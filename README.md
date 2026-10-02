@@ -2,9 +2,13 @@
 
 个人自用的「阅读」(legado) 书源自动维护仓库。
 
-- `legado.json`：精选书源合集（番茄不限量镜像源置顶）
+## 仓库组件
+
+- `legado.json`：精选书源合集（番茄官方 Cookie 源置顶）
 - `filter.js` + GitHub Actions：每 3 天自动探测域名存活、剔除死源、尝试域名搬家修复、失败保留旧版本
+- `probe.js` + `urls.txt` + `candidates.txt`：下载线路自动探活剔除、候选池自动扩容
 - `preflight.js`：升级预演工具，上传新 filter.js 前可本地跑一遍看预期效果
+- `SourceAutoSync.zip`：手机端自动同步 App 源码（每日凌晨拉取本仓库 legado.json 写入阅读 App）
 
 ## 升级流程（开发者）
 
@@ -24,4 +28,10 @@ node preflight.js
 - [tickmao/Novel](https://github.com/tickmao/Novel) （MIT）— 精而稳的 legado 源，每日验证维护
 - [jiwangyihao/source-j-legado](https://github.com/jiwangyihao/source-j-legado) （MIT）— 轻小说/二次元专项源集
 
-本仓库基于上述上游的开放许可证发布：自由使用、修改、分发，保留原署名；仅为个人学习与自用目的做筛选与保活处理，未作商业用途；如有侵权请联系删除。
+## 许可与免责声明
+
+- 本仓库自有代码（`filter.js`、`probe.js`、`preflight.js`、SourceAutoSync App）以 GPL-3.0 协议发布，见 [LICENSE](LICENSE)。
+- 书源数据沿用各上游仓库的原许可证（GPL-3.0 / MIT），完整许可证文本与版权声明见各上游仓库。
+- 本仓库仅包含书源规则配置，不存储、不分发任何小说正文内容。
+- 书源指向的第三方网站内容，版权归原网站及原作者所有；请支持正版，仅作个人学习研究用途。
+- 如有侵权，请提 Issue 联系，确认后会第一时间删除相关内容。
