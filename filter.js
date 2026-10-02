@@ -4,8 +4,8 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const fs = require('fs');
 const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36';
-// 上游全集（大灰狼维护的仓库）：作者修复了某源规则时，这里会自动拉新版进来
-const UPSTREAM = 'https://raw.githubusercontent.com/shidahuilang/shuyuan-bak/main/book.json';
+// 上游有效源合集（大灰狼仓库自动效验后的有效书源，3373 个）：作者修复了某源规则时，这里会自动拉新版进来
+const UPSTREAM = 'https://raw.githubusercontent.com/shidahuilang/shuyuan-bak/main/good.json';
 
 function norm(u) {
     try { const x = new URL(String(u).split('#')[0]); return x.origin + x.pathname.replace(/\/$/, ''); }
