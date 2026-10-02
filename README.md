@@ -5,6 +5,7 @@
 ## 仓库组件
 
 - `legado.json`：精选书源合集（番茄官方 Cookie 源置顶）
+- `replaceRule.json`：全局替换净化规则（去引导语/引流/求票/乱码，对所有书源生效）
 - `filter.js` + GitHub Actions：每 3 天自动探测域名存活、剔除死源、尝试域名搬家修复、失败保留旧版本
 - `probe.js` + `urls.txt` + `candidates.txt`：下载线路自动探活剔除、候选池自动扩容
 - `preflight.js`：升级预演工具，上传新 filter.js 前可本地跑一遍看预期效果
