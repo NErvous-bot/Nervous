@@ -3,9 +3,35 @@
 // 无任何依赖，GitHub Actions 的 Node 20 可直接运行
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const fs = require('fs');
-const UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36';
-// 上游有效源合集（大灰狼仓库自动效验后的有效书源，3373 个）：作者修复了某源规则时，这里会自动拉新版进来
-const UPSTREAM = 'https://raw.githubusercontent.com/shidahuilang/shuyuan-bak/main/good.json';
+// 多 UA 池：随机选，绕过部分站点的反爬 UA 黑名单（参考 tickmao AUTO_SUPPLEMENT 思路）
+const UAS = [
+    'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+    'Legado/3.26 (Android 14)'
+];
+const pickUA = () => UAS[Math.floor(Math.random() * UAS.length)];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 上游源清单（按优先级：主→备，自动降级，任一失败不影响其他）
+// 1) tickmao/Novel：MIT 协议，196 源 / 98.5% 验证有效，天天维护（推荐主上游）
+// 2) jiwangyihao/source-j-legado：MIT，655 stars，轻小说/二次元专项，每个网站一个 JSON
+//    （注：fqweb.json 是自建服务器模板，不可直接用，故未加入）
+// 3) shidahuilang/shuyuan-bak：GPL-3.0，3373 源大体量，含番茄镜像（备上游，体量补充）
+const UPSTREAMS = [
+    'https://cdn.jsdelivr.net/gh/tickmao/Novel@master/sources/legado/full.json',
+    // jiwangyihao 源集（轻小说/二次元专项）
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/bilinovel.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/bilinovel-like.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/esjzone.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/fishhawk.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/lk-lightnovel-us.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/masiro.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/rezero.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/wenku.json',
+    'https://cdn.jsdelivr.net/gh/jiwangyihao/source-j-legado@master/zaimanhua.json',  // 漫画→被BAD过滤
+    'https://raw.githubusercontent.com/shidahuilang/shuyuan-bak/main/good.json'
+];
 
 function norm(u) {
     try { const x = new URL(String(u).split('#')[0]); return x.origin + x.pathname.replace(/\/$/, ''); }
@@ -15,20 +41,31 @@ function originOf(u) {
     try { return new URL(String(u).split('#')[0]).origin; } catch (e) { return null; }
 }
 
-async function get(u, ms) {
+async function get(u, ms, fixedUA) {
     const c = new AbortController();
     const t = setTimeout(() => c.abort(), ms || 12000);
     try {
-        const r = await fetch(u, { headers: { 'User-Agent': UA }, signal: c.signal, redirect: 'follow' });
+        const r = await fetch(u, { headers: { 'User-Agent': fixedUA || pickUA() }, signal: c.signal, redirect: 'follow' });
         clearTimeout(t); return r;
     } catch (e) { clearTimeout(t); return null; }
 }
 
+// 探活：超时/403 自动换 UA 重试 1 次（参考 tickmao 错误分类重试思路）
 async function alive(o) {
-    const r = await get(o, 15000);
+    let r = await get(o, 12000);
+    // 超时：换 UA 重试（部分站点首次握手慢或 UA 黑名单）
+    if (!r) { await sleep(2000); r = await get(o, 12000); }
     if (!r) return false;
+    // 5xx：服务器问题，放弃
     if (r.status >= 500) return false;
+    // 404/410：死链，放弃
     if (r.status === 404 || r.status === 410) return false;
+    // 403：可能反爬 UA 黑名单，换 UA 重试 1 次
+    if (r.status === 403) {
+        await sleep(3000);
+        r = await get(o, 12000);
+        if (!r || r.status >= 500 || r.status === 404 || r.status === 410) return false;
+    }
     return true;
 }
 
@@ -40,19 +77,32 @@ async function pool(items, n, fn) {
 }
 
 async function upstreamMap() {
-    try {
-        console.log('拉取上游书源全集...');
-        const r = await get(UPSTREAM, 60000);
-        if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'fail'));
-        const arr = JSON.parse(await r.text());
-        const m = new Map();
-        for (const s of arr) { const k = norm(s.bookSourceUrl); if (k && !m.has(k)) m.set(k, s); }
-        console.log('上游共 ' + arr.length + ' 个源');
-        return m;
-    } catch (e) {
-        console.log('上游获取失败（不影响本次保活）: ' + e.message);
+    const merged = new Map();
+    let success = 0;
+    for (const url of UPSTREAMS) {
+        try {
+            const tag = url.includes('tickmao') ? '[主]' : '[备]';
+            console.log('拉取上游 ' + tag + ': ' + url.slice(0, 65) + '...');
+            const r = await get(url, 60000);
+            if (!r || !r.ok) throw new Error('HTTP ' + (r ? r.status : 'fail'));
+            const arr = JSON.parse(await r.text());
+            let added = 0;
+            for (const s of arr) {
+                const k = norm(s.bookSourceUrl);
+                if (k && !merged.has(k)) { merged.set(k, s); added++; }
+            }
+            console.log('  → 原始 ' + arr.length + ' / 合并新增 ' + added);
+            success++;
+        } catch (e) {
+            console.log('  ✗ 上游失败（不影响其他）: ' + e.message);
+        }
+    }
+    if (success === 0) {
+        console.log('⚠️ 所有上游均失败（不影响本次保活）');
         return null;
     }
+    console.log('合并上游共 ' + merged.size + ' 个源');
+    return merged;
 }
 
 // 死域名的变体：换协议(http/https)、加/去 www —— 盗版站最常见的"搬家"方式
@@ -118,23 +168,53 @@ function variants(o) {
 
     // 3.5) 自动扩容：从上游实时筛一小批新源（硬过滤 → 探活 → 每轮最多15个，宁缺毋滥）
     let added = 0;
+    // 3.6) 广撒网筛番茄镜像：从所有上游专挑番茄相关源，单独探活（最多10个）
+    let fanqieAdded = 0;
     if (up) {
         const BAD = /manhua|comic|漫画|有声|听书|audio|qidian\.com|起点|sex|nsfw|成人|18plus/i;
+        const FANQIE_HINT = /fanqie|番茄|fanqienovel|taohua|39xs|tomato|fq\.|fq-/i;
         const have = new Set(out.map(s => norm(s.bookSourceUrl)));
+
+        // 通用扩容池
         const cand = [];
+        const fanqieCand = [];
         for (const s of up.values()) {
             const k = norm(s.bookSourceUrl);
             if (!k || have.has(k) || !s.searchUrl) continue;
             const tag = (s.bookSourceName || '') + ' ' + (s.bookSourceUrl || '') + ' ' + (s.bookSourceGroup || '');
             if (BAD.test(tag)) continue;
-            cand.push(s);
+            if (FANQIE_HINT.test(tag)) {
+                // 番茄相关源只走探活过 + 至少有个像样的 searchUrl
+                fanqieCand.push(s);
+            } else {
+                cand.push(s);
+            }
         }
-        // 优先上游最近更新的（作者刚维护过的），探活前 60 个候选
+
+        // 通用：优先上游最近更新的，探活前 60 个候选
         cand.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0));
         const ok = (await pool(cand.slice(0, 60), 10,
             s => alive(originOf(s.bookSourceUrl)).then(a => a ? s : null))).filter(Boolean);
         for (const s of ok.slice(0, 15)) { out.push(s); added++; }
         console.log('扩容: 候选 ' + cand.length + ' / 探活通过 ' + ok.length + ' / 新增 ' + added);
+
+        // 番茄专项：广撒网，每个候选单独探活（不批量并发避免触反爬）
+        // 优先级：_validation_status === 'valid' > 最近更新 > 默认
+        fanqieCand.sort((a, b) => {
+            const va = (a._validation_status === 'valid') ? 1 : 0;
+            const vb = (b._validation_status === 'valid') ? 1 : 0;
+            if (va !== vb) return vb - va;
+            return (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0);
+        });
+        let fanqieProbed = 0;
+        for (const s of fanqieCand.slice(0, 30)) {
+            if (!await alive(originOf(s.bookSourceUrl))) continue;
+            // 已存在的跳过
+            if (out.some(x => norm(x.bookSourceUrl) === norm(s.bookSourceUrl))) continue;
+            out.push(s); fanqieAdded++; fanqieProbed++;
+            if (fanqieAdded >= 10) break; // 番茄兜底每轮最多新增 10 个
+        }
+        console.log('番茄广撒网: 候选 ' + fanqieCand.length + ' / 新增 ' + fanqieAdded);
     }
 
     // 4) 阈值保护：单次剔除超 30% 视为 Actions 网络抖动，放弃写入（旧版本保留）
@@ -142,10 +222,10 @@ function variants(o) {
         console.log('⚠️ 本次剔除超过 30%，疑似运行环境网络抖动，放弃写入，旧版本保留。');
         return;
     }
-    if (merged === 0 && repaired === 0 && removed === 0 && added === 0) {
+    if (merged === 0 && repaired === 0 && removed === 0 && added === 0 && fanqieAdded === 0) {
         console.log('无变化，不提交');
         return;
     }
     fs.writeFileSync(file, JSON.stringify(out));
-    console.log('legado.json 已更新（合并 ' + merged + ' / 修复 ' + repaired + ' / 剔除 ' + removed + ' / 新增 ' + added + '）');
+    console.log('legado.json 已更新（合并 ' + merged + ' / 修复 ' + repaired + ' / 剔除 ' + removed + ' / 新增 ' + added + ' / 番茄+' + fanqieAdded + '）');
 })();
