@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 解压项目
-        run: unzip -o SourceAutoSync.zip -d .
+        run: unzip -o SourceAutoSync.zip -d SourceAutoSync
       - name: 源文件诊断
         run: |
           echo "### runner上的源文件指纹" >> $GITHUB_STEP_SUMMARY
