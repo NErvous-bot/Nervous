@@ -209,13 +209,15 @@ public class SyncWorker extends Worker {
         return current;
     }
 
-    /** 解析名单文本：一行一条URL，忽略空行和#注释，必须指向 legado.json */
+    /** 解析名单文本：一行一条URL，忽略空行和#注释，必须指向 legado.json。
+     *  只接受 https://（targetSdk 34 禁明文，http 线路会静默失败，直接滤掉防呆）。 */
     private List<String> parseLines(String txt) {
         List<String> out = new ArrayList<>();
         if (txt == null) return out;
         for (String s : txt.split("\n")) {
             s = s.trim();
-            if (!s.isEmpty() && !s.startsWith("#") && s.contains("legado.json")) out.add(s);
+            if (!s.isEmpty() && !s.startsWith("#") && s.contains("legado.json")
+                    && s.startsWith("https://")) out.add(s);
         }
         return out;
     }
