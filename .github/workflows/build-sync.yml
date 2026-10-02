@@ -21,7 +21,7 @@ jobs:
         run: |
           cd SourceAutoSync
           set -o pipefail
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          gradle assembleDebug --no-build-cache --rerun-tasks 2>&1 | tee build.log
       - name: 错误摘要
         if: failure()
         run: |
