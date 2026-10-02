@@ -116,15 +116,36 @@ function variants(o) {
     console.log('存活 ' + out.length + ' / ' + list.length + '，剔除 ' + removed + ' 个');
     if (dead.size) console.log('最终死域名:\n' + [...dead].join('\n'));
 
+    // 3.5) 自动扩容：从上游实时筛一小批新源（硬过滤 → 探活 → 每轮最多15个，宁缺毋滥）
+    let added = 0;
+    if (up) {
+        const BAD = /manhua|comic|漫画|有声|听书|audio|qidian\.com|起点|sex|nsfw|成人|18plus/i;
+        const have = new Set(out.map(s => norm(s.bookSourceUrl)));
+        const cand = [];
+        for (const s of up.values()) {
+            const k = norm(s.bookSourceUrl);
+            if (!k || have.has(k) || !s.searchUrl) continue;
+            const tag = (s.bookSourceName || '') + ' ' + (s.bookSourceUrl || '') + ' ' + (s.bookSourceGroup || '');
+            if (BAD.test(tag)) continue;
+            cand.push(s);
+        }
+        // 优先上游最近更新的（作者刚维护过的），探活前 60 个候选
+        cand.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0));
+        const ok = (await pool(cand.slice(0, 60), 10,
+            s => alive(originOf(s.bookSourceUrl)).then(a => a ? s : null))).filter(Boolean);
+        for (const s of ok.slice(0, 15)) { out.push(s); added++; }
+        console.log('扩容: 候选 ' + cand.length + ' / 探活通过 ' + ok.length + ' / 新增 ' + added);
+    }
+
     // 4) 阈值保护：单次剔除超 30% 视为 Actions 网络抖动，放弃写入（旧版本保留）
     if (list.length > 0 && removed > list.length * 0.3) {
         console.log('⚠️ 本次剔除超过 30%，疑似运行环境网络抖动，放弃写入，旧版本保留。');
         return;
     }
-    if (merged === 0 && repaired === 0 && removed === 0) {
+    if (merged === 0 && repaired === 0 && removed === 0 && added === 0) {
         console.log('无变化，不提交');
         return;
     }
     fs.writeFileSync(file, JSON.stringify(out));
-    console.log('legado.json 已更新（合并 ' + merged + ' / 修复 ' + repaired + ' / 剔除 ' + removed + '）');
+    console.log('legado.json 已更新（合并 ' + merged + ' / 修复 ' + repaired + ' / 剔除 ' + removed + ' / 新增 ' + added + '）');
 })();
