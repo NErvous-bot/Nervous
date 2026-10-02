@@ -1,8 +1,8 @@
 # 镜像线路名单（每行一条，App 每次同步前自动拉取本文件）
 # 顺序即优先级：前面的先试。GitHub Actions 每3天自动探活剔除死线。
 # 手动维护：直接编辑本文件提交即可，手机App下次同步自动生效，无需重装。
-https://ghproxy.net/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
-https://ghfast.top/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
-https://gh-proxy.com/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
-https://cdn.jsdelivr.net/gh/NErvous-bot/Nervous@main/legado.json
-https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://ghproxy.net/https://raw.githubusercontent.com/NErvous-bot/x2yefuobr-15whlj/main/legado.json
+https://ghfast.top/https://raw.githubusercontent.com/NErvous-bot/x2yefuobr-15whlj/main/legado.json
+https://gh-proxy.com/https://raw.githubusercontent.com/NErvous-bot/x2yefuobr-15whlj/main/legado.json
+https://cdn.jsdelivr.net/gh/NErvous-bot/x2yefuobr-15whlj@main/legado.json
+https://raw.githubusercontent.com/NErvous-bot/x2yefuobr-15whlj/main/legado.json
