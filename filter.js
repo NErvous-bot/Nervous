@@ -74,9 +74,12 @@ function variants(o) {
     let merged = 0, repaired = 0;
 
     // 1) 上游合并：同名源取 lastUpdateTime 更新的版本（作者修复的规则自动进来）
+    //    自研源（如番茄镜像）跳过合并，防止自定义 weight/规则被上游覆盖
+    const isOwn = s => /taijiwang/.test(s.bookSourceUrl || '');
     const up = await upstreamMap();
     if (up) {
         for (const s of list) {
+            if (isOwn(s)) continue;
             const u = up.get(norm(s.bookSourceUrl));
             if (u && (u.lastUpdateTime || 0) > (s.lastUpdateTime || 0)) { Object.assign(s, u); merged++; }
         }
