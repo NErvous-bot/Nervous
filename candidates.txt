@@ -1,0 +1,13 @@
+# 候选镜像池：urls.txt 不足10条时，GitHub Actions 自动探测本池并补充
+# 来源：jsDelivr 官方备用域名 + 社区常见 ghproxy 中转站
+# 平时无需维护；池子里活源快耗尽时才需要人工补几个新站
+https://fastly.jsdelivr.net/gh/NErvous-bot/Nervous@main/legado.json
+https://testingcf.jsdelivr.net/gh/NErvous-bot/Nervous@main/legado.json
+https://gcore.jsdelivr.net/gh/NErvous-bot/Nervous@main/legado.json
+https://mirror.ghproxy.com/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://ghps.cc/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://ghp.ci/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://gh.ddlc.top/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://ghproxy.link/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://ghproxy.cc/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
+https://gh-proxy.net/https://raw.githubusercontent.com/NErvous-bot/Nervous/main/legado.json
