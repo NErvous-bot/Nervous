@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 精确可见性：只声明阅读App的包名与其ContentProvider，
+         替代 QUERY_ALL_PACKAGES（避免被国产安全软件标记"获取全部应用列表"） -->
+    <queries>
+        <package android:name="com.legado.app.release" />
+        <provider android:authorities="com.legado.app.release.readerProvider" />
+    </queries>
+
+    <application
+        android:label="书源自动同步"
+        android:allowBackup="false"
+        android:theme="@style/AppTheme">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

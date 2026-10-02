@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.nervous.sourcesync'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'io.nervous.sourcesync'
+        minSdk 23
+        targetSdk 34
+        versionCode 8
+        versionName '3.4'
+    }
+
+    signingConfigs {
+        release {
+            // keystore 由 CI 从 GitHub Secrets 解码放置到项目根目录
+            storeFile rootProject.file('keystore.jks')
+            storeType 'PKCS12'
+            storePassword System.getenv('KEYSTORE_PASS')
+            keyAlias System.getenv('KEY_ALIAS')
+            keyPassword System.getenv('KEY_PASS')
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+
+// Force UTF-8 source encoding (Chinese comments break javac under wrong locale)
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+dependencies {
+    implementation 'androidx.work:work-runtime:2.9.1'
+}

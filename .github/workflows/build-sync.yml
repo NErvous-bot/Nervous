@@ -6,8 +6,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 解压项目
-        run: unzip -o SourceAutoSync.zip -d SourceAutoSync
       - name: 还原签名密钥
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > SourceAutoSync/keystore.jks

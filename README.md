@@ -9,7 +9,7 @@
 - `filter.js` + GitHub Actions：每 3 天自动探测域名存活、剔除死源、尝试域名搬家修复、失败保留旧版本
 - `probe.js` + `urls.txt` + `candidates.txt`：下载线路自动探活剔除、候选池自动扩容
 - `preflight.js`：升级预演工具，上传新 filter.js 前可本地跑一遍看预期效果
-- `SourceAutoSync.zip`：手机端自动同步 App 源码（每日凌晨拉取本仓库 legado.json 写入阅读 App）
+- `SourceAutoSync/`：手机端自动同步 App 源码（每周一凌晨拉取本仓库 legado.json 与 replaceRule.json 写入阅读 App）
 
 ## 升级流程（开发者）
 

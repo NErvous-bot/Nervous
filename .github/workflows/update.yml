@@ -1,7 +1,9 @@
 name: 更新书源
 on:
   schedule:
-    - cron: '0 2 */3 * *'
+    # UTC 02:23 ≈ 北京时间 10:23，错峰整点减少调度延迟；*/3 按日号取模，
+    # 月底可能 31号→1号 连跑（已知无害，不处理）
+    - cron: '23 2 */3 * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -16,6 +18,11 @@ jobs:
       - run: node filter.js
       - name: 镜像线路探活
         run: node probe.js
+      - name: 成品校验（防上游返回畸形数据被自动提交）
+        run: |
+          node -e "const a=require('./legado.json');if(!Array.isArray(a)||a.length<100)throw new Error('书源数异常:'+a.length)"
+          node -e "const r=require('./replaceRule.json');if(!Array.isArray(r)||r.length<1)throw new Error('净化规则异常:'+r.length)"
+          echo "校验通过：legado.json 与 replaceRule.json 结构正常"
       - name: commit
         run: |
           git config user.name "github-actions[bot]"
