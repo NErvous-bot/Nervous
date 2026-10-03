@@ -79,6 +79,9 @@ public class SyncWorker extends Worker {
 
     private static final int BATCH = 80;
 
+    /** 接口诊断信息（探针失败时写进结果，用户截图即可远程定位） */
+    private String authorityDiag = "";
+
     public SyncWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
     }
@@ -89,35 +92,75 @@ public class SyncWorker extends Worker {
     }
 
     /**
-     * 自动探测阅读App的 readerProvider authority。
-     * v3.11 回退到 v3.5 风格：硬编码官方包名 + 真接口验证（query 不抛 SecurityException）。
-     * v3.9/v3.10 的「全手机扫描」+「多路径探针」在 vivo 上翻车——
-     * vivo ROM 注册了伪 com.legado.app.release.readerProvider，
-     * 扫描时被命中；写入探针又会被 vivo 的 ContentProvider 拦截策略打回。
-     * 「写死官方包名」+「query 验证不抛异常」是最稳的策略。
+     * 发现并验证阅读App的 ReaderProvider authority（依据官方源码实测）：
+     *  - authority = 包名 + ".readerProvider"，随包名动态注册；
+     *  - 路由 bookSources/query 是天然存活探针：路由匹配即返回非空 cursor，
+     *    不匹配/接口不存在则返回 null 或抛异常——据此区分真假接口；
+     *  - 官方 ReaderProvider.match 失败时 insert 静默返回 null，从不抛
+     *    Unknown URL——该异常只会来自「authority 根本没注册」，即当时
+     *    手机上装的阅读版不含此接口。
      */
     private String resolveAuthority() {
-        String[] candidates = {
-                "io.legado.app.release.readerProvider",   // 阅读官方版 3.x（昨晚跑通的）
-                "com.legado.app.release.readerProvider"   // 第三方魔改版
-        };
-        for (String a : candidates) {
+        List<String> cands = new ArrayList<>();
+        try {
+            android.content.pm.PackageManager pm = getApplicationContext().getPackageManager();
+            for (android.content.pm.PackageInfo p : pm.getInstalledPackages(
+                    android.content.pm.PackageManager.GET_PROVIDERS)) {
+                if (p.providers == null) continue;
+                for (android.content.pm.ProviderInfo pi : p.providers) {
+                    if (pi.authority == null) continue;
+                    for (String a : pi.authority.split(";")) {
+                        if (a.endsWith(".readerProvider") && !cands.contains(a)) cands.add(a);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        // 兜底硬编码（覆盖官方 release/releaseA 与旧 io. 前缀版）
+        for (String h : new String[]{
+                "com.legado.app.release.readerProvider",
+                "io.legado.app.release.readerProvider",
+                "com.legado.app.releaseA.readerProvider"}) {
+            if (!cands.contains(h)) cands.add(h);
+        }
+        for (String a : cands) {
             try {
                 android.database.Cursor c = getApplicationContext().getContentResolver()
-                        .query(Uri.parse("content://" + a + "/bookSources"), null, null, null, null);
+                        .query(Uri.parse("content://" + a + "/bookSources/query?url=_probe"),
+                                null, null, null, null);
                 if (c != null) {
                     c.close();
                     prog("已定位阅读App接口：" + a);
                     return a;
                 }
-                // cursor==null：authority 根本未注册。vivo 的伪 Provider
-                // 走到这一步会抛 SecurityException，被 catch 掉继续试下一个。
+                authorityDiag += a + "=无响应 ";
             } catch (Exception e) {
-                android.util.Log.w("SyncWorker", "候选接口被拒绝 " + a + ": " + e.getMessage());
-                continue;
+                authorityDiag += a + "=" + e.getClass().getSimpleName() + " ";
+                android.util.Log.w("SyncWorker", "接口探针失败 " + a + ": " + e.getMessage());
             }
         }
         return null;
+    }
+
+    /**
+     * 唤起阅读App的官方在线导入入口（OnLineImportActivity，源码注释原文：
+     * 「格式: legado://import/{path}?src={url}」）。
+     * kind = bookSource / replaceRule。阅读App 自己下载并导入，
+     * ImportXxxDialog(url, true) 的 true = autoImport，全程无需用户确认。
+     * 手动同步（本App在前台）必成；后台定时同步若被系统拦截，返回 false
+     * 并在结果里引导用户点「立即同步」。
+     */
+    private boolean fireOnlineImport(String kind, String url) {
+        try {
+            android.content.Intent it = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+            it.setData(Uri.parse("legado://import/" + kind + "?src="
+                    + java.net.URLEncoder.encode(url, "UTF-8")));
+            it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            getApplicationContext().startActivity(it);
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("SyncWorker", "唤起导入失败: " + e.getMessage());
+            return false;
+        }
     }
 
     @NonNull
@@ -165,22 +208,24 @@ public class SyncWorker extends Worker {
             return Result.success();
         }
 
-        // 4) 自动探测阅读App的provider + 写入路径（兼容多版本）
+        // 4) 发现并验证阅读App接口（探针通过才写入）
         String authority = resolveAuthority();
         if (authority == null) {
-            save("失败：未找到阅读App的书源接口，请确认已安装阅读App后重试");
-            return Result.failure();
+            // 兜底：唤起阅读App官方在线导入（legado://import/bookSource 深链，
+            // autoImport=true 全自动，阅读App 自己下载，无需文件中转）
+            String src = defaultLines(decodeRepo())[0] + "?cb=" + System.currentTimeMillis();
+            boolean fired = fireOnlineImport("bookSource", src);
+            save(fired
+                    ? "接口探针全不通过（" + authorityDiag.trim() + "），已唤起阅读App自动导入"
+                    : "失败：未找到阅读App，请先安装阅读App再同步｜" + authorityDiag.trim());
+            return Result.success();
         }
         try {
             prog("验签通过，正在写入阅读App…");
             JSONArray all = new JSONArray(json);
             int total = all.length();
-            // v3.11：路径回退到昨晚 v3.5 跑通的 /bookSources/insert。
-            // 不要在 vivo 上跑写入路径探针——vivo 的 ContentProvider 拦截策略
-            // 会把任何陌生路径（包括 /bookSourceDebug/importSource）打成异常，
-            // 反而干扰真实路径。
+            // 官方路由表（源码实测）：书源批量写入 = bookSources/insert，body 键名 json
             Uri uri = Uri.parse("content://" + authority + "/bookSources/insert");
-            prog("已定位书源插入路径：/bookSources/insert");
             for (int i = 0; i < total; i += BATCH) {
                 JSONArray part = new JSONArray();
                 for (int j = i; j < Math.min(i + BATCH, total); j++) {
@@ -200,9 +245,15 @@ public class SyncWorker extends Worker {
             save("成功：已写入" + total + "源｜" + ruleMsg);
             return Result.success();
         } catch (Exception e) {
+            // provider 写入中途失败（版本差异/权限拦截）：唤起官方在线导入兜底
+            String src = defaultLines(decodeRepo())[0] + "?cb=" + System.currentTimeMillis();
+            boolean fired = fireOnlineImport("bookSource", src);
             String m = e.getMessage();
-            save("失败：" + (m == null ? e.getClass().getSimpleName() : m));
-            return Result.failure();
+            save((fired
+                    ? "写入异常已转自动导入，原因："
+                    : "失败：")
+                    + (m == null ? e.getClass().getSimpleName() : m));
+            return Result.success();
         }
     }
 
@@ -259,29 +310,12 @@ public class SyncWorker extends Worker {
     }
 
     /**
-     * v3.11：插入路径回退到 v3.5 风格（写死 /bookSources/insert），
-     * 不再跑多路径探针（vivo 拦截策略会把陌生路径打成异常干扰真实路径）。
-     * 如果 /bookSources/insert 失败，先试 /replaceRule/debugImport（旧版调试接口）。
+     * 同步全局净化规则。官方 ReaderProvider 路由表（源码实测）只有
+     * 书源/rss/书籍三类路由，【没有】净化规则路由——之前用 provider 写
+     * 规则的路从来不存在。v3.13 起规则变化时唤起阅读App官方在线导入
+     * 深链（legado://import/replaceRule），阅读App 自行下载并自动导入。
+     * 失败只汇报，不影响书源同步。
      */
-    private String findInsertPath(String authority) {
-        String[] paths = {
-                "/replaceRule/insert",   // 净化规则写入（独立路径）
-                "/replaceRule"
-        };
-        for (String p : paths) {
-            try {
-                getApplicationContext().getContentResolver()
-                        .query(Uri.parse("content://" + authority + p), null, null, null, null);
-                prog("已定位净化规则路径：" + p);
-                return p;
-            } catch (Exception ignored) {
-                continue;
-            }
-        }
-        return "/replaceRule/insert";   // 兜底
-    }
-
-    /** 同步全局净化规则到阅读App，同样走验签。失败只汇报，不影响书源同步。 */
     private String syncRules(List<String> lines) {
         try {
             StringBuilder err = new StringBuilder();
@@ -293,30 +327,19 @@ public class SyncWorker extends Worker {
                 return "规则无变化";
             }
 
-            String authority = resolveAuthority();
-            if (authority == null) return "规则未同步：未找到阅读App接口";
-            String insertPath = findInsertPath(authority);
-
-            JSONArray all = new JSONArray(rjson);
-            int total = all.length();
-            Uri uri = Uri.parse("content://" + authority + insertPath);
-            try {
-                ContentValues v = new ContentValues();
-                v.put("json", all.toString());
-                getApplicationContext().getContentResolver().insert(uri, v);
-            } catch (Exception batchFail) {
-                for (int i = 0; i < total; i++) {
-                    ContentValues v = new ContentValues();
-                    v.put("json", all.get(i).toString());
-                    getApplicationContext().getContentResolver().insert(uri, v);
-                }
+            String src = defaultLines(decodeRepo())[0].replace("legado.json", "replaceRule.json")
+                    + "?cb=" + System.currentTimeMillis();
+            boolean fired = fireOnlineImport("replaceRule", src);
+            if (!fired) {
+                // 后台同步时系统拦截界面启动——引导用户手动同步（前台必成）
+                return "规则有更新：请打开本App点「立即同步」完成导入";
             }
             OutputStream os = new FileOutputStream(rcache);
             os.write(rjson.getBytes("UTF-8"));
             os.close();
-            return "规则已更新" + total + "条";
+            return "规则更新：已唤起阅读App自动导入";
         } catch (Exception e) {
-            return "规则未同步：写入失败";
+            return "规则未同步：异常";
         }
     }
 

@@ -106,7 +106,7 @@ public class MainActivity extends Activity {
         }
         String progLine = (progress == null) ? "" : "\n▶ " + progress + "\n";
         status.setText(
-                "书源自动同步 v3.11" + progLine +
+                "书源自动同步 v3.13" + progLine +
                 "\n上次：" + last + "\n" +
                 (hist.length() == 0 ? "" : "\n最近记录：" + hist + "\n") +
                 "\n每周一凌晨5点自动同步（错过自动补跑）· 镜像自动切换 · 全程验签");
