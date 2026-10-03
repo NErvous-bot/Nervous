@@ -50,9 +50,13 @@ public class SyncWorker extends Worker {
             35, 63, 60, 47, 53, 56, 40, 119, 107, 111, 45, 50, 54, 48
     };
 
-    /** Ed25519 公钥（X509 DER, base64）。私钥只在仓库 Actions 的 Secrets 里。 */
+    /**
+     * EC P-256 公钥（X509 SPKI, base64）。私钥只在仓库 Actions 的 Secrets 里。
+     * 注意：不用 Ed25519——部分 Android 13 机型的 Ed25519 KeyFactory 无法从
+     * X.509 编码导入公钥（抛 InvalidKeySpecException），ECDSA 全版本原生支持。
+     */
     private static final String PUB_B64 =
-            "MCowBQYDK2VwAyEACqlWcnXE6x9d/shXbKSNF20Ur2Xy/cCTBHP4gGx85TE=";
+            "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYJwAmT/ACOVylm2nMFauKPsuFG6lAxXm9Vqe1ztgalp3udP0JgsZjLC3velPRa9YBq+8xdexXD4DfQae8kOKQg==";
 
     private static final String GH_RAW = "https://raw.githubusercontent.com/";
     private static final String GH_JSD = "https://cdn.jsdelivr.net/gh/";
@@ -189,17 +193,17 @@ public class SyncWorker extends Worker {
     }
 
     /**
-     * 验证 Ed25519 签名（签名 = 原始64字节签名的base64，由 Actions 的
-     * openssl pkeyutl -rawin 生成，RFC 8032 兼容）。
+     * 验证 ECDSA P-256 签名（签名 = openssl dgst -sha256 -sign 输出的 DER 编码
+     * 的 base64，与 Java「SHA256withECDSA」格式一致）。
      * 直接对下载的原始字节验签，不做任何字符串转码。
      * @return null=通过；其他=失败原因
      */
     private String verify(byte[] content, String sigB64) {
         try {
             byte[] pub = Base64.getDecoder().decode(PUB_B64);
-            PublicKey pk = KeyFactory.getInstance("Ed25519")
+            PublicKey pk = KeyFactory.getInstance("EC")
                     .generatePublic(new X509EncodedKeySpec(pub));
-            Signature sg = Signature.getInstance("Ed25519");
+            Signature sg = Signature.getInstance("SHA256withECDSA");
             sg.initVerify(pk);
             sg.update(content);
             if (sg.verify(Base64.getDecoder().decode(sigB64))) return null;
