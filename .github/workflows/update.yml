@@ -34,13 +34,16 @@ jobs:
           ED25519_KEY: ${{ secrets.ED25519_KEY }}
         run: |
           echo "$ED25519_KEY" | base64 -d > key.pem
-          openssl pkeyutl -sign -inkey key.pem -rawin -in legado.json | base64 -w0 > legado.sig
-          openssl pkeyutl -sign -inkey key.pem -rawin -in replaceRule.json | base64 -w0 > replaceRule.sig
+          # 注意文件名：App 端按「原名+.sig」取签名，即 legado.json.sig / replaceRule.json.sig
+          openssl pkeyutl -sign -inkey key.pem -rawin -in legado.json | base64 -w0 > legado.json.sig
+          openssl pkeyutl -sign -inkey key.pem -rawin -in replaceRule.json | base64 -w0 > replaceRule.json.sig
           rm key.pem
-          echo "签名完成：$(base64 -w0 legado.sig | wc -c) 字节/$(base64 -w0 replaceRule.sig | wc -c) 字节"
+          echo "签名完成：$(wc -c < legado.json.sig)/$(wc -c < replaceRule.json.sig) 字节"
       - name: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add legado.json legado.sig replaceRule.json replaceRule.sig urls.txt candidates.txt
+          # 清理旧命名的签名文件（v3.5首版的 legado.sig/replaceRule.sig）
+          git rm -q --ignore-unmatch legado.sig replaceRule.sig
+          git add legado.json legado.json.sig replaceRule.json replaceRule.json.sig urls.txt candidates.txt
           git diff --cached --quiet || (git commit -m "auto update" && git pull --rebase origin main && git push)
