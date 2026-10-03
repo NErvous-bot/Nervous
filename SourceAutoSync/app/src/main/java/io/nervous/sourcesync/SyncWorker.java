@@ -194,7 +194,7 @@ public class SyncWorker extends Worker {
         StringBuilder err = new StringBuilder();
         String json = fetchVerified("legado.json", lines, err);
         if (json == null) {
-            save("失败：" + err + "，稍后自动重试");
+            done(false, "失败：" + err + "，稍后自动重试");
             return Result.retry();
         }
 
@@ -204,7 +204,7 @@ public class SyncWorker extends Worker {
             String ruleMsg = syncRules(lines);
             ctx.getSharedPreferences("sync", Context.MODE_PRIVATE)
                     .edit().putLong("lastOk", System.currentTimeMillis()).apply();
-            save("无变化，跳过写入｜" + ruleMsg);
+            done(true, "无变化，跳过写入｜" + ruleMsg);
             return Result.success();
         }
 
@@ -215,9 +215,10 @@ public class SyncWorker extends Worker {
             // autoImport=true 全自动，阅读App 自己下载，无需文件中转）
             String src = defaultLines(decodeRepo())[0] + "?cb=" + System.currentTimeMillis();
             boolean fired = fireOnlineImport("bookSource", src);
-            save(fired
-                    ? "接口探针全不通过（" + authorityDiag.trim() + "），已唤起阅读App自动导入"
-                    : "失败：未找到阅读App，请先安装阅读App再同步｜" + authorityDiag.trim());
+            done(fired,
+                    fired
+                            ? "接口探针全不通过（" + authorityDiag.trim() + "），已唤起阅读App自动导入"
+                            : "失败：未找到阅读App，请先安装阅读App再同步｜" + authorityDiag.trim());
             return Result.success();
         }
         try {
@@ -242,17 +243,16 @@ public class SyncWorker extends Worker {
             String ruleMsg = syncRules(lines);
             ctx.getSharedPreferences("sync", Context.MODE_PRIVATE)
                     .edit().putLong("lastOk", System.currentTimeMillis()).apply();
-            save("成功：已写入" + total + "源｜" + ruleMsg);
+            done(true, "成功：已写入" + total + "源｜" + ruleMsg);
             return Result.success();
         } catch (Exception e) {
             // provider 写入中途失败（版本差异/权限拦截）：唤起官方在线导入兜底
             String src = defaultLines(decodeRepo())[0] + "?cb=" + System.currentTimeMillis();
             boolean fired = fireOnlineImport("bookSource", src);
             String m = e.getMessage();
-            save((fired
-                    ? "写入异常已转自动导入，原因："
-                    : "失败：")
-                    + (m == null ? e.getClass().getSimpleName() : m));
+            done(fired,
+                    (fired ? "写入异常已转自动导入，原因：" : "失败：")
+                            + (m == null ? e.getClass().getSimpleName() : m));
             return Result.success();
         }
     }
@@ -503,6 +503,34 @@ public class SyncWorker extends Worker {
                 sb.append(hist.get(i));
             }
             sp.edit().putString("last", line).putString("hist", sb.toString()).apply();
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * 同步终态收尾：写历史记录 + 发系统通知（成功/失败一眼可见，
+     * 点通知打开本App）。「未到窗口跳过」不打扰；通知权限未授予时静默跳过。
+     */
+    private void done(boolean ok, String msg) {
+        save(msg);
+        try {
+            Context ctx = getApplicationContext();
+            android.app.NotificationManager nm = (android.app.NotificationManager)
+                    ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.createNotificationChannel(new android.app.NotificationChannel(
+                    "sync", "同步结果", android.app.NotificationManager.IMPORTANCE_HIGH));
+            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(ctx, 1,
+                    new android.content.Intent(ctx, MainActivity.class),
+                    android.app.PendingIntent.FLAG_IMMUTABLE
+                            | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+            android.app.Notification n = new android.app.Notification.Builder(ctx, "sync")
+                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setContentTitle(ok ? "书源同步完成" : "书源同步失败")
+                    .setContentText(msg)
+                    .setStyle(new android.app.Notification.BigTextStyle().bigText(msg))
+                    .setContentIntent(pi)
+                    .setAutoCancel(true)
+                    .build();
+            nm.notify(1001, n);
         } catch (Exception ignored) {}
     }
 }

@@ -50,6 +50,12 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
         status = findViewById(R.id.status);
 
+        // Android 13+ 通知运行时权限：启动时申请一次，授权后同步结束即可发系统通知
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
+
         // manual sync button (ignores schedule, syncs immediately)
         findViewById(R.id.syncNow).setOnClickListener(v -> {
             WorkManager.getInstance(this).enqueueUniqueWork("manual",
@@ -106,7 +112,7 @@ public class MainActivity extends Activity {
         }
         String progLine = (progress == null) ? "" : "\n▶ " + progress + "\n";
         status.setText(
-                "书源自动同步 v3.13" + progLine +
+                "书源自动同步 v3.14" + progLine +
                 "\n上次：" + last + "\n" +
                 (hist.length() == 0 ? "" : "\n最近记录：" + hist + "\n") +
                 "\n每周一凌晨5点自动同步（错过自动补跑）· 镜像自动切换 · 全程验签");
