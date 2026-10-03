@@ -27,8 +27,8 @@ let runOk = true;
 let stdout = '';
 
 try {
-    // 跑 filter.js（捕获输出）
-    stdout = execSync('node filter.js', { encoding: 'utf8', timeout: 600000 });
+    // 跑 filter.js（捕获输出；候选实测会增加探测量，超时放宽到15分钟）
+    stdout = execSync('node filter.js', { encoding: 'utf8', timeout: 900000 });
     console.log(stdout);
 } catch (e) {
     runOk = false;
@@ -47,10 +47,17 @@ try {
     console.log('变化: ' + (diff >= 0 ? '+' : '') + diff);
 
     if (runOk) {
-        // 计算实际剔除率
-        const removed = beforeCount - afterCount;
+        // 真实剔除数：从 filter.js stdout 解析（首尾差会被"同时剔+增"稀释）
+        // 新日志格式：剔除 X+Y（探活+老化）
+        const m = stdout.match(/剔除\s+(\d+)\+(\d+)/);
+        const probeRemoved = m ? parseInt(m[1], 10) : 0;
+        const agedRemoved = m ? parseInt(m[2], 10) : 0;
+        const removed = probeRemoved + agedRemoved;
         const removedRate = beforeCount > 0 ? (removed / beforeCount * 100) : 0;
-        console.log('剔除率: ' + removedRate.toFixed(1) + '%');
+        console.log('剔除率: ' + removedRate.toFixed(1) + '%（探活 ' + probeRemoved + ' + 老化 ' + agedRemoved + '，按真实剔除数算，非首尾差）');
+        if (agedRemoved > 0) {
+            console.log('（老化剔除分批进行：每轮上限 8%，剩余 ' + agedRemoved + ' 个本轮已清）');
+        }
 
         if (removedRate > 30) {
             console.log('');

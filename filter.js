@@ -69,6 +69,28 @@ async function alive(o) {
     return true;
 }
 
+// 真实搜索实测：域名活着 ≠ 规则能用（盗版站常见首页正常、搜索接口已废）。
+// 只测 GET 型且带 {{key}} 槽位的规则（POST/特殊规则跳过实测，避免误杀）；
+// 返回页 >500 字节视为有实质内容。仅用于扩容候选（每轮≤60个），控制成本。
+async function usable(s) {
+    try {
+        const su = String(s.searchUrl || '');
+        if (/POST/i.test(su) || (su.indexOf('{{key}}') === -1 && su.indexOf('{key}') === -1)) return true;
+        const cut = su.indexOf(',');
+        const path = (cut === -1 ? su : su.slice(0, cut))
+            .replace(/\{\{key\}\}|\{key\}/g, encodeURIComponent('都市'))
+            .replace(/\{\{page\}\}|\{page\}/g, '1');
+        const base = originOf(s.bookSourceUrl);
+        if (!base) return true;
+        const r = await get(new URL(path, base).href, 15000);
+        if (!r || !r.ok) return false;
+        const t = await r.text();
+        return t.length > 500;
+    } catch (e) {
+        return true; // 实测自身异常不拦候选，交给域名探活结果
+    }
+}
+
 async function pool(items, n, fn) {
     const ret = []; let i = 0;
     async function w() { while (i < items.length) { const k = i++; ret[k] = await fn(items[k], k); } }
@@ -106,10 +128,11 @@ async function upstreamMap() {
 }
 
 // 死域名的变体：换协议(http/https)、加/去 www —— 盗版站最常见的"搬家"方式
+// https 源只迁 https（禁止降级到明文），http 源优先迁 https（借机升级协议）
 function variants(o) {
     const u = new URL(o);
     const h = u.hostname.replace(/^www\./, '');
-    const protos = u.protocol === 'https:' ? ['https:', 'http:'] : ['http:', 'https:'];
+    const protos = u.protocol === 'https:' ? ['https:'] : ['https:', 'http:'];
     const out = [];
     for (const p of protos) for (const n of [h, 'www.' + h]) {
         const v = p + '//' + n;
@@ -161,10 +184,26 @@ function variants(o) {
         }
     }
 
-    const out = list.filter(s => !dead.has(originOf(s.bookSourceUrl)));
+    let out = list.filter(s => !dead.has(originOf(s.bookSourceUrl)));
     const removed = list.length - out.length;
     console.log('存活 ' + out.length + ' / ' + list.length + '，剔除 ' + removed + ' 个');
     if (dead.size) console.log('最终死域名:\n' + [...dead].join('\n'));
+
+    // 3.1) 老化剔除：>365天未更新 ≈ 作者弃坑（盗版站规则寿命普遍不到半年）。
+    //      最老的先走，每轮最多剔 8%，分批清完避免一次大出血；
+    //      30% 阈值闸门只管探活死（防网络抖动误判），老化剔除单独限额不占闸门。
+    //      上游有新版本时 lastUpdateTime 会被合并刷新，只有上游也弃更的源才会老化
+    const NOW = Date.now();
+    const AGED = 365 * 864e5, AGED_CAP = 0.08;
+    const agedList = out.filter(s => NOW - (s.lastUpdateTime || 0) > AGED)
+                        .sort((a, b) => (a.lastUpdateTime || 0) - (b.lastUpdateTime || 0));
+    const agedKill = new Set(agedList.slice(0, Math.floor(out.length * AGED_CAP))
+                                    .map(s => norm(s.bookSourceUrl)));
+    const agedRemoved = out.filter(s => agedKill.has(norm(s.bookSourceUrl))).length;
+    if (agedRemoved) {
+        out = out.filter(s => !agedKill.has(norm(s.bookSourceUrl)));
+        console.log('老化剔除 ' + agedRemoved + ' 个（>365天未更新，剩余 ' + (agedList.length - agedRemoved) + ' 个后续轮次继续）');
+    }
 
     // 3.5) 自动扩容：从上游实时筛一小批新源（硬过滤 → 探活 → 每轮最多15个，宁缺毋滥）
     let added = 0;
@@ -191,12 +230,12 @@ function variants(o) {
             }
         }
 
-        // 通用：优先上游最近更新的，探活前 60 个候选
+        // 通用：优先上游最近更新的，探活+搜索实测各一道，前 60 个候选
         cand.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0));
         const ok = (await pool(cand.slice(0, 60), 10,
-            s => alive(originOf(s.bookSourceUrl)).then(a => a ? s : null))).filter(Boolean);
+            s => alive(originOf(s.bookSourceUrl)).then(a => a && usable(s) ? s : null))).filter(Boolean);
         for (const s of ok.slice(0, 15)) { out.push(s); added++; }
-        console.log('扩容: 候选 ' + cand.length + ' / 探活通过 ' + ok.length + ' / 新增 ' + added);
+        console.log('扩容: 候选 ' + cand.length + ' / 探活+实测通过 ' + ok.length + ' / 新增 ' + added);
 
         // 番茄专项：广撒网，每个候选单独探活（不批量并发避免触反爬）
         // 优先级：_validation_status === 'valid' > 最近更新 > 默认
@@ -209,6 +248,7 @@ function variants(o) {
         let fanqieProbed = 0;
         for (const s of fanqieCand.slice(0, 30)) {
             if (!await alive(originOf(s.bookSourceUrl))) continue;
+            if (!await usable(s)) continue;
             // 已存在的跳过
             if (out.some(x => norm(x.bookSourceUrl) === norm(s.bookSourceUrl))) continue;
             out.push(s); fanqieAdded++; fanqieProbed++;
@@ -222,10 +262,10 @@ function variants(o) {
         console.log('⚠️ 本次剔除超过 30%，疑似运行环境网络抖动，放弃写入，旧版本保留。');
         return;
     }
-    if (merged === 0 && repaired === 0 && removed === 0 && added === 0 && fanqieAdded === 0) {
+    if (merged === 0 && repaired === 0 && removed === 0 && agedRemoved === 0 && added === 0 && fanqieAdded === 0) {
         console.log('无变化，不提交');
         return;
     }
     fs.writeFileSync(file, JSON.stringify(out));
-    console.log('legado.json 已更新（合并 ' + merged + ' / 修复 ' + repaired + ' / 剔除 ' + removed + ' / 新增 ' + added + ' / 番茄+' + fanqieAdded + '）');
+    console.log('legado.json 已更新（合并 ' + merged + ' / 修复 ' + repaired + ' / 剔除 ' + removed + '+' + agedRemoved + '（探活+老化）/ 新增 ' + added + ' / 番茄+' + fanqieAdded + '）');
 })();
