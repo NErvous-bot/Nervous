@@ -12,8 +12,8 @@ android {
         // 不降 minSdk 以免扩大兼容面）。目标设备 vivo X200 Pro。
         minSdk 33
         targetSdk 34
-        versionCode 16
-        versionName '3.12'
+        versionCode 17
+        versionName '3.13'
     }
 
     signingConfigs {
@@ -46,6 +46,6 @@ tasks.withType(JavaCompile).configureEach {
 
 dependencies {
     implementation 'androidx.work:work-runtime:2.9.1'
-    // FileProvider 需要（唤起阅读App文件导入界面用）
+    // androidx.work 的传递依赖（v3.13 起不再直接用 FileProvider，R8 自动裁剪）
     implementation 'androidx.core:core:1.13.1'
 }

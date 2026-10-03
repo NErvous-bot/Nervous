@@ -79,6 +79,9 @@ public class SyncWorker extends Worker {
 
     private static final int BATCH = 80;
 
+    /** 接口诊断信息（探针失败时写进结果，用户截图即可远程定位） */
+    private String authorityDiag = "";
+
     public SyncWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
     }
@@ -129,7 +132,9 @@ public class SyncWorker extends Worker {
                     prog("已定位阅读App接口：" + a);
                     return a;
                 }
+                authorityDiag += a + "=无响应 ";
             } catch (Exception e) {
+                authorityDiag += a + "=" + e.getClass().getSimpleName() + " ";
                 android.util.Log.w("SyncWorker", "接口探针失败 " + a + ": " + e.getMessage());
             }
         }
@@ -137,27 +142,20 @@ public class SyncWorker extends Worker {
     }
 
     /**
-     * 唤起阅读App的文件导入界面（FileAssociationActivity：官方 manifest 声明
-     * 接收 ACTION_VIEW + content:// + application/json，按内容自动嗅探为
-     * 书源导入或净化规则导入）。需用户在阅读App里点一下「导入」确认。
-     * 注意：后台定时同步时系统会拦截后台启动界面——手动同步（App在前台）必成。
+     * 唤起阅读App的官方在线导入入口（OnLineImportActivity，源码注释原文：
+     * 「格式: legado://import/{path}?src={url}」）。
+     * kind = bookSource / replaceRule。阅读App 自己下载并导入，
+     * ImportXxxDialog(url, true) 的 true = autoImport，全程无需用户确认。
+     * 手动同步（本App在前台）必成；后台定时同步若被系统拦截，返回 false
+     * 并在结果里引导用户点「立即同步」。
      */
-    private boolean fireImport(String content, String fileName) {
+    private boolean fireOnlineImport(String kind, String url) {
         try {
-            Context ctx = getApplicationContext();
-            File dir = new File(ctx.getCacheDir(), "sync");
-            dir.mkdirs();
-            File f = new File(dir, fileName);
-            OutputStream os = new FileOutputStream(f);
-            os.write(content.getBytes("UTF-8"));
-            os.close();
-            Uri uri = androidx.core.content.FileProvider.getUriForFile(
-                    ctx, ctx.getPackageName() + ".fileProvider", f);
             android.content.Intent it = new android.content.Intent(android.content.Intent.ACTION_VIEW);
-            it.setDataAndType(uri, "application/json");
-            it.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-            ctx.startActivity(it);
+            it.setData(Uri.parse("legado://import/" + kind + "?src="
+                    + java.net.URLEncoder.encode(url, "UTF-8")));
+            it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            getApplicationContext().startActivity(it);
             return true;
         } catch (Exception e) {
             android.util.Log.w("SyncWorker", "唤起导入失败: " + e.getMessage());
@@ -213,11 +211,13 @@ public class SyncWorker extends Worker {
         // 4) 发现并验证阅读App接口（探针通过才写入）
         String authority = resolveAuthority();
         if (authority == null) {
-            // 兜底：直接唤起阅读App的导入界面（书源 json 会被嗅探为书源导入）
-            boolean fired = fireImport(json, "legado.json");
+            // 兜底：唤起阅读App官方在线导入（legado://import/bookSource 深链，
+            // autoImport=true 全自动，阅读App 自己下载，无需文件中转）
+            String src = defaultLines(decodeRepo())[0] + "?cb=" + System.currentTimeMillis();
+            boolean fired = fireOnlineImport("bookSource", src);
             save(fired
-                    ? "接口探针全不通过，已唤起阅读App导入界面，请在阅读App中点「导入」"
-                    : "失败：未找到阅读App，请先安装阅读App再同步");
+                    ? "接口探针全不通过（" + authorityDiag.trim() + "），已唤起阅读App自动导入"
+                    : "失败：未找到阅读App，请先安装阅读App再同步｜" + authorityDiag.trim());
             return Result.success();
         }
         try {
@@ -245,11 +245,12 @@ public class SyncWorker extends Worker {
             save("成功：已写入" + total + "源｜" + ruleMsg);
             return Result.success();
         } catch (Exception e) {
-            // provider 写入中途失败（版本差异/权限拦截）：整包唤起阅读App导入兜底
-            boolean fired = fireImport(json, "legado.json");
+            // provider 写入中途失败（版本差异/权限拦截）：唤起官方在线导入兜底
+            String src = defaultLines(decodeRepo())[0] + "?cb=" + System.currentTimeMillis();
+            boolean fired = fireOnlineImport("bookSource", src);
             String m = e.getMessage();
             save((fired
-                    ? "写入异常已转导入界面（请在阅读App点「导入」），原因："
+                    ? "写入异常已转自动导入，原因："
                     : "失败：")
                     + (m == null ? e.getClass().getSimpleName() : m));
             return Result.success();
@@ -311,9 +312,9 @@ public class SyncWorker extends Worker {
     /**
      * 同步全局净化规则。官方 ReaderProvider 路由表（源码实测）只有
      * 书源/rss/书籍三类路由，【没有】净化规则路由——之前用 provider 写
-     * 规则的路从来不存在。v3.12 起规则变化时改为：把 replaceRule.json
-     * 落到 FileProvider，唤起阅读App 的文件导入界面（内容自动嗅探为
-     * 规则导入），用户点一次「导入」即可。失败只汇报，不影响书源同步。
+     * 规则的路从来不存在。v3.13 起规则变化时唤起阅读App官方在线导入
+     * 深链（legado://import/replaceRule），阅读App 自行下载并自动导入。
+     * 失败只汇报，不影响书源同步。
      */
     private String syncRules(List<String> lines) {
         try {
@@ -326,7 +327,9 @@ public class SyncWorker extends Worker {
                 return "规则无变化";
             }
 
-            boolean fired = fireImport(rjson, "replaceRule.json");
+            String src = defaultLines(decodeRepo())[0].replace("legado.json", "replaceRule.json")
+                    + "?cb=" + System.currentTimeMillis();
+            boolean fired = fireOnlineImport("replaceRule", src);
             if (!fired) {
                 // 后台同步时系统拦截界面启动——引导用户手动同步（前台必成）
                 return "规则有更新：请打开本App点「立即同步」完成导入";
@@ -334,7 +337,7 @@ public class SyncWorker extends Worker {
             OutputStream os = new FileOutputStream(rcache);
             os.write(rjson.getBytes("UTF-8"));
             os.close();
-            return "规则更新：已在阅读App弹出导入，请点「导入」确认";
+            return "规则更新：已唤起阅读App自动导入";
         } catch (Exception e) {
             return "规则未同步：异常";
         }
