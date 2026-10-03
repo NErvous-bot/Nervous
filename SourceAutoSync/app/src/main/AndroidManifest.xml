@@ -8,12 +8,20 @@
     <queries>
         <package android:name="io.legado.app.release" />
         <package android:name="com.legado.app.release" />
+        <package android:name="com.legado.app.releaseA" />
         <provider android:authorities="io.legado.app.release.readerProvider" />
         <provider android:authorities="com.legado.app.release.readerProvider" />
+        <provider android:authorities="com.legado.app.releaseA.readerProvider" />
         <!-- 全量可见性：所有带桌面图标的App（覆盖任意包名的阅读发行版），供动态扫描 -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- 阅读App的文件导入界面（FileAssociationActivity 接收 ACTION_VIEW + json） -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <data android:mimeType="application/json" />
         </intent>
     </queries>
 
@@ -31,5 +39,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- FileProvider：把书源/规则 json 写到缓存后通过 content:// 唤起阅读App导入 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileProvider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
