@@ -34,11 +34,11 @@ import java.util.List;
  * Sync worker: fetch book source JSON from GitHub, then write into
  * Legado reader app via its ContentProvider (batched inserts).
  *
- * v3.5 安全模型：
- *  - 仓库地址逐字符 XOR 存储（D8 常量折叠不还原），运行时解码；
- *  - 所有下载内容（书源/净化规则）必须带 Ed25519 签名（Actions 私钥
- *    签名，App 内嵌公钥验签），验签失败视为线路被劫持，换下一条线；
- *    镜像只是字节搬运工，不再是信任根。
+ * v3.6：
+ *  - 全部下载改为字节级处理并验签原始字节（彻底排除任何转码差异）；
+ *  - 请求追加随机 cb 参数穿透代理/CDN 缓存——带缓存的 WiFi 代理曾把
+ *    旧版 json 和新签名混搭发给 App 导致验签失败，现在每次强制回源；
+ *  - 全程 setProgress 上报进度（界面实时显示当前第几条线路）。
  */
 public class SyncWorker extends Worker {
 
@@ -50,15 +50,13 @@ public class SyncWorker extends Worker {
             35, 63, 60, 47, 53, 56, 40, 119, 107, 111, 45, 50, 54, 48
     };
 
-    /** Ed25519 公钥（X509 DER, base64）。私钥只在仓库 Actions 的 Secrets 里，用于对
-     *  legado.json / replaceRule.json 签名；App 只验不签。公钥非机密，可入 dex。 */
+    /** Ed25519 公钥（X509 DER, base64）。私钥只在仓库 Actions 的 Secrets 里。 */
     private static final String PUB_B64 =
             "MCowBQYDK2VwAyEACqlWcnXE6x9d/shXbKSNF20Ur2Xy/cCTBHP4gGx85TE=";
 
     private static final String GH_RAW = "https://raw.githubusercontent.com/";
     private static final String GH_JSD = "https://cdn.jsdelivr.net/gh/";
 
-    /** 拉取镜像名单的锚点线路（必须稳定，名单本身很小） */
     private static String[] anchorUrls(String repo) {
         return new String[]{
                 GH_RAW + repo + "/main/urls.txt",
@@ -67,7 +65,6 @@ public class SyncWorker extends Worker {
         };
     }
 
-    /** 兜底名单：首次安装且云端名单拉不到时使用 */
     private static String[] defaultLines(String repo) {
         return new String[]{
                 "https://ghproxy.net/" + GH_RAW + repo + "/main/legado.json",
@@ -82,6 +79,11 @@ public class SyncWorker extends Worker {
 
     public SyncWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
+    }
+
+    private void prog(String msg) {
+        try { setProgress(new androidx.work.Data.Builder().putString("msg", msg).build()); }
+        catch (Exception ignored) {}
     }
 
     @NonNull
@@ -108,6 +110,7 @@ public class SyncWorker extends Worker {
         }
 
         // 1) 刷新镜像名单
+        prog("正在刷新镜像名单…");
         List<String> lines = refreshLines();
 
         // 2) 下载书源（逐线路「下载+验签」双确认，验签不过=线路不可信，换线）
@@ -130,6 +133,7 @@ public class SyncWorker extends Worker {
 
         // 4) 分批写入阅读App
         try {
+            prog("验签通过，正在写入阅读App…");
             JSONArray all = new JSONArray(json);
             int total = all.length();
             Uri uri = Uri.parse("content://" + AUTHORITY + "/bookSources/insert");
@@ -141,6 +145,7 @@ public class SyncWorker extends Worker {
                 ContentValues v = new ContentValues();
                 v.put("json", part.toString());
                 getApplicationContext().getContentResolver().insert(uri, v);
+                prog("正在写入书源 " + Math.min(i + BATCH, total) + "/" + total + "…");
             }
             OutputStream os = new FileOutputStream(cache);
             os.write(json.getBytes("UTF-8"));
@@ -158,19 +163,24 @@ public class SyncWorker extends Worker {
 
     /**
      * 带 Ed25519 验签的下载：对每条线路，同时取「文件 + 文件.sig」，
-     * 验签通过才返回内容；任何一环失败都换下一条线路（fail closed，
-     * 无签名的数据一律不写入阅读App）。
+     * 验签通过才返回内容；任何一环失败都换下一条线路（fail closed）。
+     * 请求带随机 cb 参数穿透代理/CDN 缓存，保证 body 与 sig 来自同一
+     * 份回源数据，杜绝「旧内容配新签名」的缓存错位。
      */
     private String fetchVerified(String fileName, List<String> lines, StringBuilder err) {
-        for (String line : lines) {
-            String url = line.replace("legado.json", fileName);
-            String body = fetch(url);
-            if (body == null) { err.append("[下载失败]").append(hostOf(url)); continue; }
-            String sig = fetch(url + ".sig");
-            if (sig == null) { err.append("[无签名]").append(hostOf(url)); continue; }
-            String vr = verify(body, sig.trim());
-            if (vr == null) return body;          // 验签通过
-            err.append("[签名不符]").append(hostOf(url));
+        int total = lines.size();
+        for (int i = 0; i < total; i++) {
+            String url = lines.get(i).replace("legado.json", fileName);
+            String host = hostOf(url);
+            prog("正在尝试线路 " + (i + 1) + "/" + total + "：" + host.trim());
+            String cb = (url.contains("?") ? "&" : "?") + "cb=" + System.currentTimeMillis();
+            byte[] body = fetchBytes(url + cb);
+            if (body == null) { err.append("[下载失败]").append(host); continue; }
+            byte[] sigB = fetchBytes(url + ".sig" + cb);
+            if (sigB == null) { err.append("[无签名]").append(host); continue; }
+            String vr = verify(body, new String(sigB, java.nio.charset.StandardCharsets.UTF_8).trim());
+            if (vr == null) return new String(body, java.nio.charset.StandardCharsets.UTF_8);
+            err.append("[签名不符]").append(host);
         }
         if (err.length() == 0) err.append("未知错误");
         return null;
@@ -179,16 +189,17 @@ public class SyncWorker extends Worker {
     /**
      * 验证 Ed25519 签名（签名 = 原始64字节签名的base64，由 Actions 的
      * openssl pkeyutl -rawin 生成，RFC 8032 兼容）。
+     * 直接对下载的原始字节验签，不做任何字符串转码。
      * @return null=通过；其他=失败原因
      */
-    private String verify(String content, String sigB64) {
+    private String verify(byte[] content, String sigB64) {
         try {
             byte[] pub = Base64.getDecoder().decode(PUB_B64);
             PublicKey pk = KeyFactory.getInstance("Ed25519")
                     .generatePublic(new X509EncodedKeySpec(pub));
             Signature sg = Signature.getInstance("Ed25519");
             sg.initVerify(pk);
-            sg.update(content.getBytes("UTF-8"));
+            sg.update(content);
             if (sg.verify(Base64.getDecoder().decode(sigB64))) return null;
             return "签名不符";
         } catch (Exception e) {
@@ -201,10 +212,7 @@ public class SyncWorker extends Worker {
         catch (Exception e) { return "? "; }
     }
 
-    /**
-     * 同步全局净化规则（replaceRule.json）到阅读App，同样走验签。
-     * 失败只汇报，不影响书源同步结果。
-     */
+    /** 同步全局净化规则到阅读App，同样走验签。失败只汇报，不影响书源同步。 */
     private String syncRules(List<String> lines) {
         try {
             StringBuilder err = new StringBuilder();
@@ -239,10 +247,7 @@ public class SyncWorker extends Worker {
         }
     }
 
-    /**
-     * 刷新下载线路：云端拉 urls.txt → 成功则缓存并返回新名单；
-     * 失败则用本地缓存；本地也无缓存则用内置兜底名单。
-     */
+    /** 刷新下载线路：云端拉 urls.txt → 成功则缓存并返回新名单；失败则用本地缓存；再退内置兜底。 */
     private List<String> refreshLines() {
         String repo = decodeRepo();
         File cache = new File(getApplicationContext().getFilesDir(), "lines.txt");
@@ -267,8 +272,7 @@ public class SyncWorker extends Worker {
         return sb.toString();
     }
 
-    /** 解析名单文本：一行一条URL，忽略空行和#注释，必须指向 legado.json。
-     *  只接受 https://（targetSdk 34 禁明文，http 线路会静默失败，直接滤掉防呆）。 */
+    /** 解析名单文本：只接受 https:// 且指向 legado.json 的行。 */
     private List<String> parseLines(String txt) {
         List<String> out = new ArrayList<>();
         if (txt == null) return out;
@@ -308,8 +312,8 @@ public class SyncWorker extends Worker {
         } catch (Exception ignored) {}
     }
 
-    /** Download url content, return null on failure. */
-    private String fetch(String urlStr) {
+    /** Download url content as raw bytes, return null on failure. */
+    private byte[] fetchBytes(String urlStr) {
         HttpURLConnection conn = null;
         try {
             URL url = new URL(urlStr);
@@ -329,7 +333,7 @@ public class SyncWorker extends Worker {
             int n;
             while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
             in.close();
-            return bos.toString("UTF-8");
+            return bos.toByteArray();
         } catch (Exception e) {
             return null;
         } finally {
@@ -337,9 +341,13 @@ public class SyncWorker extends Worker {
         }
     }
 
+    private String fetch(String urlStr) {
+        byte[] b = fetchBytes(urlStr);
+        return b == null ? null : new String(b, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     /** 智能选代理：环境变量 HTTP_PROXY/HTTPS_PROXY > 系统 ProxySelector > 直连 */
     private Proxy pickProxy(URL url) {
-        // 1) HTTP_PROXY / HTTPS_PROXY 环境变量（部分代理工具会注入）
         try {
             String envKey = "HTTPS_PROXY";
             String env = System.getenv(envKey);
@@ -354,7 +362,6 @@ public class SyncWorker extends Worker {
                 if (h != null) return new Proxy(Proxy.Type.HTTP, new java.net.InetSocketAddress(h, p));
             }
         } catch (Exception ignored) {}
-        // 2) 系统代理（Wifi 设置的代理 / PAC 脚本）
         try {
             URI uri = url.toURI();
             java.util.List<Proxy> proxies = ProxySelector.getDefault().select(uri);

@@ -2,19 +2,47 @@ package io.nervous.sourcesync;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Handler;
 import android.widget.TextView;
 
 import androidx.work.ExistingPeriodicWorkPolicy;
 import androidx.work.ExistingWorkPolicy;
 import androidx.work.OneTimeWorkRequest;
 import androidx.work.PeriodicWorkRequest;
+import androidx.work.WorkInfo;
 import androidx.work.WorkManager;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
 
     private TextView status;
+    private volatile String progress;   // 实时进度（来自 WorkInfo.progress）
+    private final Handler poll = new Handler();
+
+    private final Runnable pollTask = new Runnable() {
+        @Override public void run() {
+            try {
+                WorkManager wm = WorkManager.getInstance(MainActivity.this);
+                String found = null;
+                for (String name : new String[]{"manual", "daily"}) {
+                    List<WorkInfo> list = wm.getWorkInfosForUniqueWork(name).get();
+                    if (list != null && !list.isEmpty()) {
+                        WorkInfo wi = list.get(0);
+                        if (wi.getState() == WorkInfo.State.RUNNING) {
+                            String m = wi.getProgress().getString("msg");
+                            found = (m == null ? "正在同步…" : m);
+                            break;
+                        }
+                    }
+                }
+                progress = found;   // null = 没有任务在跑，显示历史结果
+            } catch (Exception ignored) {}
+            refresh();
+            poll.postDelayed(this, 1000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,18 +97,17 @@ public class MainActivity extends Activity {
         StringBuilder hist = new StringBuilder();
         String old = sp.getString("hist", null);
         if (old != null) {
-            String[] arr = old.split("\n");
-            for (int i = 0; i < arr.length; i++) {
-                hist.append(i == 0 ? "最近记录（最新在上）：" : "").append('\n').append(arr[i]).append('\n');
-            }
+            for (String s : old.split("\n")) hist.append('\n').append(s);
         }
+        String prog = (progress == null) ? "" : "\n同步中：▶ " + progress + "\n";
         status.setText(
-                "书源自动同步 v3.5\n\n" +
+                "书源自动同步 v3.6\n" + prog +
                 "写入目标：阅读App（com.legado.app.release）\n" +
                 "更新频率：每周一凌晨5点自动同步，超13天未同步自动补跑\n" +
                 "同步内容：书源 + 全局净化规则（全程Ed25519验签，防镜像投毒）\n" +
                 "镜像线路：云端自动获取，线路失效自动切换\n\n" +
-                "上次结果：\n" + last + "\n\n" + hist + "\n" +
+                "上次结果：\n" + last + "\n" +
+                (old == null ? "" : "\n最近记录（最新在上）：" + hist + "\n") +
                 "提示：请在系统设置中允许本App「后台运行/自启动」，否则定时任务可能被省电机制拦截。\n" +
                 "若错过周一窗口（关机/断网），随时手动点「立即同步」补一次。");
     }
@@ -88,6 +115,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        refresh();
+        poll.postDelayed(pollTask, 200);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        poll.removeCallbacks(pollTask);
     }
 }
