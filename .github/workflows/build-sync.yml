@@ -1,6 +1,8 @@
 name: 编译同步App
 on:
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,3 +46,11 @@ jobs:
         with:
           name: sync-app
           path: SourceAutoSync/app/build/outputs/apk/release/app-release.apk
+      - name: 发布APK到仓库（国内绕过Azure下载页，直接走镜像线路）
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp SourceAutoSync/app/build/outputs/apk/release/app-release.apk sync-app.apk
+          git add sync-app.apk
+          git diff --cached --quiet || (git commit -m "发布 sync-app.apk" && git pull --rebase origin main && git push)
