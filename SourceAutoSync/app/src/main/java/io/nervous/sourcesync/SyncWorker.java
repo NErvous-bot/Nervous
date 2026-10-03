@@ -91,19 +91,25 @@ public class SyncWorker extends Worker {
     /**
      * 自动探测阅读App的 readerProvider authority。
      * 不同发行版包名不同（io.legado.app.release / com.legado.app.release …），
-     * 写死会在换装/重装阅读App后失效——改为枚举系统已注册的 provider，
-     * 按后缀 .readerProvider 匹配，一劳永逸。找不到返回 null。
+     * 写死会在换装/重装阅读App后失效——改为逐个探测候选接口，命中即用。
+     * 探测方式：query 该 authority，cursor==null（无此provider）则试下一个；
+     * 抛异常（provider存在但该路径不可query）也算命中。找不到返回 null。
      */
     private String resolveAuthority() {
-        try {
-            for (android.content.pm.ProviderInfo pi : getApplicationContext().getPackageManager()
-                    .queryContentProviders(null, 0, 0)) {
-                if (pi.authorities == null) continue;
-                for (String a : pi.authorities.split(";")) {
-                    if (a.endsWith(".readerProvider")) return a;
-                }
+        String[] candidates = {
+                "io.legado.app.release.readerProvider",   // 阅读官方版
+                "com.legado.app.release.readerProvider"   // 其他发行版
+        };
+        for (String a : candidates) {
+            try {
+                android.database.Cursor c = getApplicationContext().getContentResolver()
+                        .query(Uri.parse("content://" + a + "/bookSources"), null, null, null, null);
+                if (c != null) { c.close(); return a; }
+                // cursor==null：该 authority 未注册任何 provider，试下一个
+            } catch (Exception e) {
+                return a;   // provider 存在（只是该路径不可 query）
             }
-        } catch (Exception ignored) {}
+        }
         return null;
     }
 
