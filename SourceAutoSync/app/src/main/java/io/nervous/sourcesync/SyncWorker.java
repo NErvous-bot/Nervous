@@ -90,9 +90,10 @@ public class SyncWorker extends Worker {
 
     /**
      * 自动探测阅读App的 readerProvider authority。
-     * v3.9：不再认死包名——先扫描所有已装App的Provider，谁带 readerProvider 就用谁
-     * （阅读全系列发行版的接口命名规律都是 <包名>.readerProvider），
-     * 重装/换装任何发行版都能自动适配；扫描被系统限制时退回直连候选探测。
+     * v3.10：分层探测——1) 先全手机扫描含 legado 的接口（哪个权威优先）；
+     * 2) 兜底按「官方版 io. → 其它发行版 com.」顺序探测，避免历史 bug：
+     * 旧版 v3.9 fallback 先试 com. 后试 io.，对只装官方版的用户永远先命中
+     * 错误的 com.，再被「抛异常也算命中」的逻辑接受，导致路径错位。
      */
     private String resolveAuthority() {
         try {
@@ -105,29 +106,42 @@ public class SyncWorker extends Worker {
                 for (android.content.pm.ProviderInfo pi : p.providers) {
                     if (pi.authority == null) continue;
                     for (String a : pi.authority.split(";")) {
-                        if (a.toLowerCase().contains("readerprovider")) found.add(a);
+                        String low = a.toLowerCase();
+                        if (low.contains("legado") && low.contains("readerprovider")) {
+                            found.add(a);   // 含 legado 的优先级最高
+                        } else if (low.contains("readerprovider")) {
+                            found.add(a);   // 其它含 readerprovider 的（罕见）
+                        }
                     }
                 }
             }
             if (!found.isEmpty()) {
-                for (String a : found) if (a.contains("legado")) { prog("已定位阅读App接口：" + a); return a; }
+                // 优先级：io.legado → com.legado → 其它
+                for (String a : found) if (a.startsWith("io.legado")) {
+                    prog("已定位阅读App接口：" + a); return a;
+                }
+                for (String a : found) if (a.startsWith("com.legado")) {
+                    prog("已定位阅读App接口：" + a); return a;
+                }
                 prog("已定位阅读App接口：" + found.get(0));
                 return found.get(0);
             }
         } catch (Exception ignored) {}
+        // 兜底：官方版优先（与全手机扫描优先级一致，避免历史 bug）
         String[] candidates = {
-                "io.legado.app.release.readerProvider",   // 阅读官方版
-                "com.legado.app.release.readerProvider"   // 其他发行版
+                "io.legado.app.release.readerProvider",   // 阅读官方版 3.x
+                "com.legado.app.release.readerProvider"   // 第三方魔改版
         };
         for (String a : candidates) {
             try {
                 android.database.Cursor c = getApplicationContext().getContentResolver()
                         .query(Uri.parse("content://" + a + "/bookSources"), null, null, null, null);
                 if (c != null) { c.close(); prog("已定位阅读App接口：" + a); return a; }
-                // cursor==null：该 authority 未注册任何 provider，试下一个
             } catch (Exception e) {
-                prog("已定位阅读App接口：" + a);
-                return a;   // provider 存在（只是该路径不可 query）
+                // 不要把抛异常当成「存在」接受！抛异常 = URL 路径有误或权限缺失，
+                // 真正的命中标准应当是「能 query 到 /bookSources 至少 1 行」
+                // 既然本候选 query 都不可用，继续试下一个，不直接返回。
+                android.util.Log.w("SyncWorker", "候选接口不可用 " + a + ": " + e.getMessage());
             }
         }
         return null;
@@ -178,7 +192,7 @@ public class SyncWorker extends Worker {
             return Result.success();
         }
 
-        // 4) 自动探测阅读App的provider（兼容 io./com. 不同发行版）
+        // 4) 自动探测阅读App的provider + 写入路径（兼容多版本）
         String authority = resolveAuthority();
         if (authority == null) {
             save("失败：未找到阅读App的书源接口，请确认已安装阅读App后重试");
@@ -188,7 +202,43 @@ public class SyncWorker extends Worker {
             prog("验签通过，正在写入阅读App…");
             JSONArray all = new JSONArray(json);
             int total = all.length();
-            Uri uri = Uri.parse("content://" + authority + "/bookSources/insert");
+            // 写入路径多版本兼容：先试旧版 /bookSources/insert，失败再试
+            // 3.23+ 官方版的 /bookSourceDebug/importSource，再失败再降级
+            // /bookSources/importLegacy，最后回退 /bookSources。
+            String[] insertPaths = {
+                    "/bookSources/insert",
+                    "/bookSourceDebug/importSource",
+                    "/bookSources/importLegacy",
+                    "/bookSources"
+            };
+            String workingPath = null;
+            String lastInsertErr = null;
+            for (String p : insertPaths) {
+                Uri uri = Uri.parse("content://" + authority + p);
+                try {
+                    ContentValues v = new ContentValues();
+                    // 先单条探针：写一条空书源，能写就证明这条路径正确
+                    org.json.JSONObject probe = new org.json.JSONObject();
+                    probe.put("bookSourceName", "_sync_probe");
+                    probe.put("bookSourceUrl", "");
+                    probe.put("bookSourceGroup", "");
+                    probe.put("enabled", false);
+                    probe.put("enabledExplore", false);
+                    v.put("json", probe.toString());
+                    getApplicationContext().getContentResolver().insert(uri, v);
+                    workingPath = p;
+                    prog("已定位书源插入路径：" + p);
+                    break;
+                } catch (Exception pathFail) {
+                    lastInsertErr = p + ": " + pathFail.getMessage();
+                    continue;   // 试下一条路径
+                }
+            }
+            if (workingPath == null) {
+                save("失败：阅读App 不接受任何已知路径，末次：" + lastInsertErr);
+                return Result.failure();
+            }
+            Uri uri = Uri.parse("content://" + authority + workingPath);
             for (int i = 0; i < total; i += BATCH) {
                 JSONArray part = new JSONArray();
                 for (int j = i; j < Math.min(i + BATCH, total); j++) {
@@ -266,6 +316,39 @@ public class SyncWorker extends Worker {
         catch (Exception e) { return "? "; }
     }
 
+    /**
+     * v3.10：插入路径多版本自动适配。和主写入同一套探测：
+     * 先 /bookSources/insert（旧版）；再 /bookSourceDebug/importSource（3.23+ 官方）；
+     * 再 /bookSources/importLegacy；最后 /bookSources。写入前先一条探针确认路径正确。
+     */
+    private String findInsertPath(String authority) {
+        String[] paths = {
+                "/bookSources/insert",
+                "/bookSourceDebug/importSource",
+                "/bookSources/importLegacy",
+                "/bookSources"
+        };
+        for (String p : paths) {
+            try {
+                org.json.JSONObject probe = new org.json.JSONObject();
+                probe.put("bookSourceName", "_sync_probe");
+                probe.put("bookSourceUrl", "");
+                probe.put("bookSourceGroup", "");
+                probe.put("enabled", false);
+                probe.put("enabledExplore", false);
+                ContentValues v = new ContentValues();
+                v.put("json", probe.toString());
+                getApplicationContext().getContentResolver()
+                        .insert(Uri.parse("content://" + authority + p), v);
+                prog("已定位书源插入路径：" + p);
+                return p;
+            } catch (Exception ignored) {
+                continue;
+            }
+        }
+        return null;
+    }
+
     /** 同步全局净化规则到阅读App，同样走验签。失败只汇报，不影响书源同步。 */
     private String syncRules(List<String> lines) {
         try {
@@ -278,9 +361,14 @@ public class SyncWorker extends Worker {
                 return "规则无变化";
             }
 
+            String authority = resolveAuthority();
+            if (authority == null) return "规则未同步：未找到阅读App接口";
+            String insertPath = findInsertPath(authority);
+            if (insertPath == null) return "规则未同步：未找到净化规则插入路径";
+
             JSONArray all = new JSONArray(rjson);
             int total = all.length();
-            Uri uri = Uri.parse("content://" + resolveAuthority() + "/replaceRule/insert");
+            Uri uri = Uri.parse("content://" + authority + insertPath);
             try {
                 ContentValues v = new ContentValues();
                 v.put("json", all.toString());
