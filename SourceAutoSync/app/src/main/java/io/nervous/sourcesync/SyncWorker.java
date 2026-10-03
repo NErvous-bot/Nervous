@@ -21,46 +21,62 @@ import java.net.Proxy;
 import java.net.ProxySelector;
 import java.net.URI;
 import java.net.URL;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 
 /**
  * Sync worker: fetch book source JSON from GitHub, then write into
  * Legado reader app via its ContentProvider (batched inserts).
  *
- * v3.2: 下载线路（镜像）名单改为云端自动获取 —— 每次同步前先从
- * urls.txt 拉取最新镜像名单并缓存本地；云端不可用时用上次缓存，
- * 首次安装且无缓存时用内置兜底名单。以后增删镜像只需改仓库里的
- * urls.txt，App 无需重新安装。
+ * v3.5 安全模型：
+ *  - 仓库地址逐字符 XOR 存储（D8 常量折叠不还原），运行时解码；
+ *  - 所有下载内容（书源/净化规则）必须带 Ed25519 签名（Actions 私钥
+ *    签名，App 内嵌公钥验签），验签失败视为线路被劫持，换下一条线；
+ *    镜像只是字节搬运工，不再是信任根。
  */
 public class SyncWorker extends Worker {
 
     private static final String AUTHORITY = "com.legado.app.release.readerProvider";
 
-    /** 仓库地址分段存放，避免APK里能直接搜到完整URL（不改变功能） */
-    private static final String REPO = new StringBuilder()
-            .append("NErvous-bot").append('/')
-            .append("x2ye").append("fuobr").append('-')
-            .append("15").append("whlj").toString();
+    /** 仓库地址逐字符 ^ 0x5A 存储，防 dex 字符串直搜（运行时解码） */
+    private static final int[] REPO_ENC = {
+            20, 31, 40, 44, 53, 47, 41, 119, 56, 53, 46, 117, 34, 104,
+            35, 63, 60, 47, 53, 56, 40, 119, 107, 111, 45, 50, 54, 48
+    };
+
+    /** Ed25519 公钥（X509 DER, base64）。私钥只在仓库 Actions 的 Secrets 里，用于对
+     *  legado.json / replaceRule.json 签名；App 只验不签。公钥非机密，可入 dex。 */
+    private static final String PUB_B64 =
+            "MCowBQYDK2VwAyEACqlWcnXE6x9d/shXbKSNF20Ur2Xy/cCTBHP4gGx85TE=";
+
     private static final String GH_RAW = "https://raw.githubusercontent.com/";
     private static final String GH_JSD = "https://cdn.jsdelivr.net/gh/";
 
     /** 拉取镜像名单的锚点线路（必须稳定，名单本身很小） */
-    private static final String[] ANCHOR_URLS = {
-            GH_RAW + REPO + "/main/urls.txt",
-            GH_JSD + REPO + "@main/urls.txt",
-            "https://ghproxy.net/" + GH_RAW + REPO + "/main/urls.txt"
-    };
+    private static String[] anchorUrls(String repo) {
+        return new String[]{
+                GH_RAW + repo + "/main/urls.txt",
+                GH_JSD + repo + "@main/urls.txt",
+                "https://ghproxy.net/" + GH_RAW + repo + "/main/urls.txt"
+        };
+    }
 
     /** 兜底名单：首次安装且云端名单拉不到时使用 */
-    private static final String[] DEFAULT_LINES = {
-            "https://ghproxy.net/" + GH_RAW + REPO + "/main/legado.json",
-            "https://ghfast.top/" + GH_RAW + REPO + "/main/legado.json",
-            "https://gh-proxy.com/" + GH_RAW + REPO + "/main/legado.json",
-            GH_JSD + REPO + "@main/legado.json",
-            GH_RAW + REPO + "/main/legado.json"
-    };
+    private static String[] defaultLines(String repo) {
+        return new String[]{
+                "https://ghproxy.net/" + GH_RAW + repo + "/main/legado.json",
+                "https://ghfast.top/" + GH_RAW + repo + "/main/legado.json",
+                "https://gh-proxy.com/" + GH_RAW + repo + "/main/legado.json",
+                GH_JSD + repo + "@main/legado.json",
+                GH_RAW + repo + "/main/legado.json"
+        };
+    }
 
     private static final int BATCH = 80;
 
@@ -91,24 +107,20 @@ public class SyncWorker extends Worker {
             }
         }
 
-        // 1) 先刷新镜像名单（云端获取 + 本地缓存，失败则沿用旧名单）
+        // 1) 刷新镜像名单
         List<String> lines = refreshLines();
 
-        // 2) 按名单逐条尝试下载书源
-        String json = null;
-        for (String u : lines) {
-            json = fetch(u);
-            if (json != null) break;
-        }
+        // 2) 下载书源（逐线路「下载+验签」双确认，验签不过=线路不可信，换线）
+        StringBuilder err = new StringBuilder();
+        String json = fetchVerified("legado.json", lines, err);
         if (json == null) {
-            save("失败：全部 " + lines.size() + " 条线路都无法访问，请检查网络，稍后会自动重试");
+            save("失败：" + err + "，稍后会自动重试");
             return Result.retry();
         }
 
         // 3) 内容没变就跳过写入（省电）
         File cache = new File(getApplicationContext().getFilesDir(), "last.json");
         if (cache.exists() && md5(cache).equals(md5(json))) {
-            // 书源没变，但净化规则可能变了，仍需检查
             String ruleMsg = syncRules(lines);
             ctx.getSharedPreferences("sync", Context.MODE_PRIVATE)
                     .edit().putLong("lastOk", System.currentTimeMillis()).apply();
@@ -145,19 +157,59 @@ public class SyncWorker extends Worker {
     }
 
     /**
-     * 同步全局净化规则（replaceRule.json）到阅读App。
+     * 带 Ed25519 验签的下载：对每条线路，同时取「文件 + 文件.sig」，
+     * 验签通过才返回内容；任何一环失败都换下一条线路（fail closed，
+     * 无签名的数据一律不写入阅读App）。
+     */
+    private String fetchVerified(String fileName, List<String> lines, StringBuilder err) {
+        for (String line : lines) {
+            String url = line.replace("legado.json", fileName);
+            String body = fetch(url);
+            if (body == null) { err.append("[下载失败]").append(hostOf(url)); continue; }
+            String sig = fetch(url + ".sig");
+            if (sig == null) { err.append("[无签名]").append(hostOf(url)); continue; }
+            String vr = verify(body, sig.trim());
+            if (vr == null) return body;          // 验签通过
+            err.append("[签名不符]").append(hostOf(url));
+        }
+        if (err.length() == 0) err.append("未知错误");
+        return null;
+    }
+
+    /**
+     * 验证 Ed25519 签名（签名 = 原始64字节签名的base64，由 Actions 的
+     * openssl pkeyutl -rawin 生成，RFC 8032 兼容）。
+     * @return null=通过；其他=失败原因
+     */
+    private String verify(String content, String sigB64) {
+        try {
+            byte[] pub = Base64.getDecoder().decode(PUB_B64);
+            PublicKey pk = KeyFactory.getInstance("Ed25519")
+                    .generatePublic(new X509EncodedKeySpec(pub));
+            Signature sg = Signature.getInstance("Ed25519");
+            sg.initVerify(pk);
+            sg.update(content.getBytes("UTF-8"));
+            if (sg.verify(Base64.getDecoder().decode(sigB64))) return null;
+            return "签名不符";
+        } catch (Exception e) {
+            return "验签异常:" + e.getClass().getSimpleName();
+        }
+    }
+
+    private String hostOf(String url) {
+        try { return new URL(url).getHost() + " "; }
+        catch (Exception e) { return "? "; }
+    }
+
+    /**
+     * 同步全局净化规则（replaceRule.json）到阅读App，同样走验签。
      * 失败只汇报，不影响书源同步结果。
      */
     private String syncRules(List<String> lines) {
         try {
-            String rjson = null;
-            for (String u : lines) {
-                if (u.contains("legado.json")) {
-                    rjson = fetch(u.replace("legado.json", "replaceRule.json"));
-                    if (rjson != null) break;
-                }
-            }
-            if (rjson == null) return "净化规则：下载失败（不影响书源）";
+            StringBuilder err = new StringBuilder();
+            String rjson = fetchVerified("replaceRule.json", lines, err);
+            if (rjson == null) return "净化规则：验签下载失败(" + err + ")（不影响书源）";
 
             File rcache = new File(getApplicationContext().getFilesDir(), "last_rules.json");
             if (rcache.exists() && md5(rcache).equals(md5(rjson))) {
@@ -168,12 +220,10 @@ public class SyncWorker extends Worker {
             int total = all.length();
             Uri uri = Uri.parse("content://" + AUTHORITY + "/replaceRule/insert");
             try {
-                // 优先数组批量写入（与书源同机制）
                 ContentValues v = new ContentValues();
                 v.put("json", all.toString());
                 getApplicationContext().getContentResolver().insert(uri, v);
             } catch (Exception batchFail) {
-                // 部分版本不支持数组，逐条写入
                 for (int i = 0; i < total; i++) {
                     ContentValues v = new ContentValues();
                     v.put("json", all.get(i).toString());
@@ -183,7 +233,7 @@ public class SyncWorker extends Worker {
             OutputStream os = new FileOutputStream(rcache);
             os.write(rjson.getBytes("UTF-8"));
             os.close();
-            return "净化规则：已更新 " + total + " 条";
+            return "净化规则：已更新 " + total + " 条（已验签）";
         } catch (Exception e) {
             return "净化规则：写入失败（不影响书源）";
         }
@@ -194,10 +244,11 @@ public class SyncWorker extends Worker {
      * 失败则用本地缓存；本地也无缓存则用内置兜底名单。
      */
     private List<String> refreshLines() {
+        String repo = decodeRepo();
         File cache = new File(getApplicationContext().getFilesDir(), "lines.txt");
         List<String> current = parseLines(readFile(cache));
-        if (current.isEmpty()) current = toList(DEFAULT_LINES);
-        for (String a : ANCHOR_URLS) {
+        if (current.isEmpty()) current = toList(defaultLines(repo));
+        for (String a : anchorUrls(repo)) {
             String txt = fetch(a);
             if (txt == null) continue;
             List<String> fresh = parseLines(txt);
@@ -207,6 +258,13 @@ public class SyncWorker extends Worker {
             }
         }
         return current;
+    }
+
+    /** 运行时解码仓库地址 */
+    private static String decodeRepo() {
+        StringBuilder sb = new StringBuilder();
+        for (int c : REPO_ENC) sb.append((char) (c ^ 0x5A));
+        return sb.toString();
     }
 
     /** 解析名单文本：一行一条URL，忽略空行和#注释，必须指向 legado.json。
@@ -323,13 +381,25 @@ public class SyncWorker extends Worker {
         return md5(readFile(file));
     }
 
+    /** 保存本次结果，并滚动保留最近5条历史（界面可查，排查不再靠记忆） */
     private void save(String msg) {
-        getApplicationContext()
-                .getSharedPreferences("sync", Context.MODE_PRIVATE)
-                .edit()
-                .putString("last", new java.text.SimpleDateFormat(
-                        "MM-dd HH:mm", java.util.Locale.CHINA).format(new java.util.Date())
-                        + " " + msg)
-                .apply();
+        try {
+            android.content.SharedPreferences sp =
+                    getApplicationContext().getSharedPreferences("sync", Context.MODE_PRIVATE);
+            String line = new java.text.SimpleDateFormat(
+                    "MM-dd HH:mm", java.util.Locale.CHINA).format(new java.util.Date())
+                    + " " + msg;
+            List<String> hist = new ArrayList<>();
+            String old = sp.getString("hist", null);
+            if (old != null) for (String s : old.split("\n")) if (!s.isEmpty()) hist.add(s);
+            hist.add(0, line);
+            while (hist.size() > 5) hist.remove(hist.size() - 1);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < hist.size(); i++) {
+                if (i > 0) sb.append('\n');
+                sb.append(hist.get(i));
+            }
+            sp.edit().putString("last", line).putString("hist", sb.toString()).apply();
+        } catch (Exception ignored) {}
     }
 }

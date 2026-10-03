@@ -8,10 +8,12 @@ android {
 
     defaultConfig {
         applicationId 'io.nervous.sourcesync'
-        minSdk 23
+        // minSdk 33：java.security 的 Ed25519 需要 Android 13+（验签用）；
+        // 目标设备 vivo X200 Pro 为 Android 15，无兼容问题
+        minSdk 33
         targetSdk 34
-        versionCode 8
-        versionName '3.4'
+        versionCode 9
+        versionName '3.5'
     }
 
     signingConfigs {
@@ -27,7 +29,12 @@ android {
 
     buildTypes {
         release {
+            // R8 混淆+裁剪：1.65MB → 预期 600KB 左右；WorkManager 自带
+            // consumer rules，Manifest 引用的类自动 keep，无需额外 proguard
+            minifyEnabled true
+            shrinkResources true
             signingConfig signingConfigs.release
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
         }
     }
 }
