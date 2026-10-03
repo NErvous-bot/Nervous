@@ -38,7 +38,7 @@ import java.util.List;
  *  - 全部下载改为字节级处理并验签原始字节（彻底排除任何转码差异）；
  *  - 请求追加随机 cb 参数穿透代理/CDN 缓存——带缓存的 WiFi 代理曾把
  *    旧版 json 和新签名混搭发给 App 导致验签失败，现在每次强制回源；
- *  - 全程 setProgress 上报进度（界面实时显示当前第几条线路）。
+ *  - 全程 setProgressAsync 上报进度（界面实时显示当前第几条线路）。
  */
 public class SyncWorker extends Worker {
 
@@ -104,7 +104,7 @@ public class SyncWorker extends Worker {
                     && now.get(java.util.Calendar.HOUR_OF_DAY) >= 5
                     && now.get(java.util.Calendar.HOUR_OF_DAY) < 11;
             if (!firstRun && !overdue && !inWindow) {
-                save("未到同步窗口（每周一凌晨5点），本次跳过检查");
+                save("未到窗口（周一凌晨5点），跳过");
                 return Result.success();
             }
         }
@@ -117,7 +117,7 @@ public class SyncWorker extends Worker {
         StringBuilder err = new StringBuilder();
         String json = fetchVerified("legado.json", lines, err);
         if (json == null) {
-            save("失败：" + err + "，稍后会自动重试");
+            save("失败：" + err + "，稍后自动重试");
             return Result.retry();
         }
 
@@ -127,7 +127,7 @@ public class SyncWorker extends Worker {
             String ruleMsg = syncRules(lines);
             ctx.getSharedPreferences("sync", Context.MODE_PRIVATE)
                     .edit().putLong("lastOk", System.currentTimeMillis()).apply();
-            save("检查完成：书源无变化已跳过；" + ruleMsg);
+            save("无变化，跳过写入｜" + ruleMsg);
             return Result.success();
         }
 
@@ -153,10 +153,11 @@ public class SyncWorker extends Worker {
             String ruleMsg = syncRules(lines);
             ctx.getSharedPreferences("sync", Context.MODE_PRIVATE)
                     .edit().putLong("lastOk", System.currentTimeMillis()).apply();
-            save("成功：已写入 " + total + " 个书源；" + ruleMsg);
+            save("成功：已写入" + total + "源｜" + ruleMsg);
             return Result.success();
         } catch (Exception e) {
-            save("失败：" + e.getMessage());
+            String m = e.getMessage();
+            save("失败：" + (m == null ? e.getClass().getSimpleName() : m));
             return Result.failure();
         }
     }
@@ -168,21 +169,22 @@ public class SyncWorker extends Worker {
      * 份回源数据，杜绝「旧内容配新签名」的缓存错位。
      */
     private String fetchVerified(String fileName, List<String> lines, StringBuilder err) {
-        int total = lines.size();
+        int total = lines.size(), fail = 0;
+        String lastWhy = "";
         for (int i = 0; i < total; i++) {
             String url = lines.get(i).replace("legado.json", fileName);
             String host = hostOf(url);
             prog("正在尝试线路 " + (i + 1) + "/" + total + "：" + host.trim());
             String cb = (url.contains("?") ? "&" : "?") + "cb=" + System.currentTimeMillis();
             byte[] body = fetchBytes(url + cb);
-            if (body == null) { err.append("[下载失败]").append(host); continue; }
+            if (body == null) { fail++; lastWhy = host.trim() + " 下载失败"; continue; }
             byte[] sigB = fetchBytes(url + ".sig" + cb);
-            if (sigB == null) { err.append("[无签名]").append(host); continue; }
+            if (sigB == null) { fail++; lastWhy = host.trim() + " 无签名"; continue; }
             String vr = verify(body, new String(sigB, java.nio.charset.StandardCharsets.UTF_8).trim());
             if (vr == null) return new String(body, java.nio.charset.StandardCharsets.UTF_8);
-            err.append("[签名不符]").append(host);
+            fail++; lastWhy = host.trim() + " " + vr;
         }
-        if (err.length() == 0) err.append("未知错误");
+        err.append(fail).append("/").append(total).append("条线路不可信，末次：").append(lastWhy);
         return null;
     }
 
@@ -217,11 +219,11 @@ public class SyncWorker extends Worker {
         try {
             StringBuilder err = new StringBuilder();
             String rjson = fetchVerified("replaceRule.json", lines, err);
-            if (rjson == null) return "净化规则：验签下载失败(" + err + ")（不影响书源）";
+            if (rjson == null) return "规则未同步：" + err;
 
             File rcache = new File(getApplicationContext().getFilesDir(), "last_rules.json");
             if (rcache.exists() && md5(rcache).equals(md5(rjson))) {
-                return "净化规则：无变化";
+                return "规则无变化";
             }
 
             JSONArray all = new JSONArray(rjson);
@@ -241,9 +243,9 @@ public class SyncWorker extends Worker {
             OutputStream os = new FileOutputStream(rcache);
             os.write(rjson.getBytes("UTF-8"));
             os.close();
-            return "净化规则：已更新 " + total + " 条（已验签）";
+            return "规则已更新" + total + "条";
         } catch (Exception e) {
-            return "净化规则：写入失败（不影响书源）";
+            return "规则未同步：写入失败";
         }
     }
 

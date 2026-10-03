@@ -93,23 +93,23 @@ public class MainActivity extends Activity {
 
     private void refresh() {
         android.content.SharedPreferences sp = getSharedPreferences("sync", MODE_PRIVATE);
-        String last = sp.getString("last", "从未同步（安装后打开一次即注册每周任务）");
+        String last = sp.getString("last", "尚未同步，点上方按钮试试");
         StringBuilder hist = new StringBuilder();
         String old = sp.getString("hist", null);
         if (old != null) {
-            for (String s : old.split("\n")) hist.append('\n').append(s);
+            for (String s : old.split("\n")) {
+                if (s.isEmpty()) continue;
+                // 兼容旧版长文案：单行超40字截断，避免界面堆叠
+                if (s.length() > 40) s = s.substring(0, 40) + "…";
+                hist.append('\n').append(s);
+            }
         }
-        String prog = (progress == null) ? "" : "\n同步中：▶ " + progress + "\n";
+        String progLine = (progress == null) ? "" : "\n▶ " + progress + "\n";
         status.setText(
-                "书源自动同步 v3.6\n" + prog +
-                "写入目标：阅读App（com.legado.app.release）\n" +
-                "更新频率：每周一凌晨5点自动同步，超13天未同步自动补跑\n" +
-                "同步内容：书源 + 全局净化规则（全程Ed25519验签，防镜像投毒）\n" +
-                "镜像线路：云端自动获取，线路失效自动切换\n\n" +
-                "上次结果：\n" + last + "\n" +
-                (old == null ? "" : "\n最近记录（最新在上）：" + hist + "\n") +
-                "提示：请在系统设置中允许本App「后台运行/自启动」，否则定时任务可能被省电机制拦截。\n" +
-                "若错过周一窗口（关机/断网），随时手动点「立即同步」补一次。");
+                "书源自动同步 v3.6" + progLine +
+                "\n上次：" + last + "\n" +
+                (hist.length() == 0 ? "" : "\n最近记录：" + hist + "\n") +
+                "\n每周一凌晨5点自动同步（错过自动补跑）· 镜像自动切换 · 全程验签");
     }
 
     @Override
