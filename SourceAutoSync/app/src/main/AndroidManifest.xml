@@ -10,6 +10,11 @@
         <package android:name="com.legado.app.release" />
         <provider android:authorities="io.legado.app.release.readerProvider" />
         <provider android:authorities="com.legado.app.release.readerProvider" />
+        <!-- 全量可见性：所有带桌面图标的App（覆盖任意包名的阅读发行版），供动态扫描 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application

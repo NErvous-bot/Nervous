@@ -90,12 +90,31 @@ public class SyncWorker extends Worker {
 
     /**
      * 自动探测阅读App的 readerProvider authority。
-     * 不同发行版包名不同（io.legado.app.release / com.legado.app.release …），
-     * 写死会在换装/重装阅读App后失效——改为逐个探测候选接口，命中即用。
-     * 探测方式：query 该 authority，cursor==null（无此provider）则试下一个；
-     * 抛异常（provider存在但该路径不可query）也算命中。找不到返回 null。
+     * v3.9：不再认死包名——先扫描所有已装App的Provider，谁带 readerProvider 就用谁
+     * （阅读全系列发行版的接口命名规律都是 <包名>.readerProvider），
+     * 重装/换装任何发行版都能自动适配；扫描被系统限制时退回直连候选探测。
      */
     private String resolveAuthority() {
+        try {
+            android.content.pm.PackageManager pm = getApplicationContext().getPackageManager();
+            java.util.List<android.content.pm.PackageInfo> packs =
+                    pm.getInstalledPackages(android.content.pm.PackageManager.GET_PROVIDERS);
+            List<String> found = new ArrayList<>();
+            for (android.content.pm.PackageInfo p : packs) {
+                if (p.providers == null) continue;
+                for (android.content.pm.ProviderInfo pi : p.providers) {
+                    if (pi.authority == null) continue;
+                    for (String a : pi.authority.split(";")) {
+                        if (a.toLowerCase().contains("readerprovider")) found.add(a);
+                    }
+                }
+            }
+            if (!found.isEmpty()) {
+                for (String a : found) if (a.contains("legado")) { prog("已定位阅读App接口：" + a); return a; }
+                prog("已定位阅读App接口：" + found.get(0));
+                return found.get(0);
+            }
+        } catch (Exception ignored) {}
         String[] candidates = {
                 "io.legado.app.release.readerProvider",   // 阅读官方版
                 "com.legado.app.release.readerProvider"   // 其他发行版
@@ -104,9 +123,10 @@ public class SyncWorker extends Worker {
             try {
                 android.database.Cursor c = getApplicationContext().getContentResolver()
                         .query(Uri.parse("content://" + a + "/bookSources"), null, null, null, null);
-                if (c != null) { c.close(); return a; }
+                if (c != null) { c.close(); prog("已定位阅读App接口：" + a); return a; }
                 // cursor==null：该 authority 未注册任何 provider，试下一个
             } catch (Exception e) {
+                prog("已定位阅读App接口：" + a);
                 return a;   // provider 存在（只是该路径不可 query）
             }
         }
