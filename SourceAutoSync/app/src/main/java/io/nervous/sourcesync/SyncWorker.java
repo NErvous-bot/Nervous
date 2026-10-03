@@ -82,7 +82,7 @@ public class SyncWorker extends Worker {
     }
 
     private void prog(String msg) {
-        try { setProgress(new androidx.work.Data.Builder().putString("msg", msg).build()); }
+        try { setProgressAsync(new androidx.work.Data.Builder().putString("msg", msg).build()); }
         catch (Exception ignored) {}
     }
 
