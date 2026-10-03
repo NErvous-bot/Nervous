@@ -6,7 +6,9 @@
     <!-- 精确可见性：只声明阅读App的包名与其ContentProvider，
          替代 QUERY_ALL_PACKAGES（避免被国产安全软件标记"获取全部应用列表"） -->
     <queries>
+        <package android:name="io.legado.app.release" />
         <package android:name="com.legado.app.release" />
+        <provider android:authorities="io.legado.app.release.readerProvider" />
         <provider android:authorities="com.legado.app.release.readerProvider" />
     </queries>
 

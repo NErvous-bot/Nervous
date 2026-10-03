@@ -42,8 +42,6 @@ import java.util.List;
  */
 public class SyncWorker extends Worker {
 
-    private static final String AUTHORITY = "com.legado.app.release.readerProvider";
-
     /** 仓库地址逐字符 ^ 0x5A 存储，防 dex 字符串直搜（运行时解码） */
     private static final int[] REPO_ENC = {
             20, 31, 40, 44, 53, 47, 41, 119, 56, 53, 46, 117, 34, 104,
@@ -88,6 +86,25 @@ public class SyncWorker extends Worker {
     private void prog(String msg) {
         try { setProgressAsync(new androidx.work.Data.Builder().putString("msg", msg).build()); }
         catch (Exception ignored) {}
+    }
+
+    /**
+     * 自动探测阅读App的 readerProvider authority。
+     * 不同发行版包名不同（io.legado.app.release / com.legado.app.release …），
+     * 写死会在换装/重装阅读App后失效——改为枚举系统已注册的 provider，
+     * 按后缀 .readerProvider 匹配，一劳永逸。找不到返回 null。
+     */
+    private String resolveAuthority() {
+        try {
+            for (android.content.pm.ProviderInfo pi : getApplicationContext().getPackageManager()
+                    .queryContentProviders(null, 0, 0)) {
+                if (pi.authorities == null) continue;
+                for (String a : pi.authorities.split(";")) {
+                    if (a.endsWith(".readerProvider")) return a;
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     @NonNull
@@ -135,12 +152,17 @@ public class SyncWorker extends Worker {
             return Result.success();
         }
 
-        // 4) 分批写入阅读App
+        // 4) 自动探测阅读App的provider（兼容 io./com. 不同发行版）
+        String authority = resolveAuthority();
+        if (authority == null) {
+            save("失败：未找到阅读App的书源接口，请确认已安装阅读App后重试");
+            return Result.failure();
+        }
         try {
             prog("验签通过，正在写入阅读App…");
             JSONArray all = new JSONArray(json);
             int total = all.length();
-            Uri uri = Uri.parse("content://" + AUTHORITY + "/bookSources/insert");
+            Uri uri = Uri.parse("content://" + authority + "/bookSources/insert");
             for (int i = 0; i < total; i += BATCH) {
                 JSONArray part = new JSONArray();
                 for (int j = i; j < Math.min(i + BATCH, total); j++) {
@@ -232,7 +254,7 @@ public class SyncWorker extends Worker {
 
             JSONArray all = new JSONArray(rjson);
             int total = all.length();
-            Uri uri = Uri.parse("content://" + AUTHORITY + "/replaceRule/insert");
+            Uri uri = Uri.parse("content://" + resolveAuthority() + "/replaceRule/insert");
             try {
                 ContentValues v = new ContentValues();
                 v.put("json", all.toString());
